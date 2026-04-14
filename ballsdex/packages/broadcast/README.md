@@ -1,0 +1,3 @@
+- `/broadcast` allows you to use commands to have the bot broadcast on all channels that have been config. You can broadcast with image too.
+- `/broadcast_dm` allows you to use commands to have the bot broadcast on specific user(s).
+- `/list_broadcast_channels` will use embed to list all the channels that have been config, including the name and ID of each server, the name and ID of each channel, the number of people on the server, and a warning if the last ten balls have all been captured by the same person, which can be used for farm control, but it is recommended to go to the admin panel to check it out before taking any action.
