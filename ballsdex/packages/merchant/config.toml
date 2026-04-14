@@ -1,0 +1,6 @@
+# for /merchant convert_token, set the name of a ball to use as a token
+token_ball_name = "venustoken"
+
+# Coins received for each token converted when using /merchant convert_token
+# Example: 1 token = 100 coins
+token_conversion_rate = 1500
