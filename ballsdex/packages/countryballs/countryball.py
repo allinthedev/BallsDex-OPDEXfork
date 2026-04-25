@@ -12,6 +12,7 @@ from discord.ui import Button, Modal, TextInput, View, button
 from tortoise.timezone import get_default_timezone
 from tortoise.timezone import now as tortoise_now
 
+from ballsdex.core.currency_models import CurrencySettings, MoneyInstance
 from ballsdex.core.metrics import caught_balls
 from ballsdex.core.models import (
     Ball,
@@ -100,9 +101,25 @@ class CountryballNamePrompt(Modal, title=f"Catch this {settings.collectible_name
         ball, has_caught_before = await self.view.catch_ball(
             interaction.user, player=player, guild=interaction.guild
         )
+        text = self.view.get_catch_message(ball, has_caught_before, interaction.user.mention)
+        if random.random() < 0.65:
+            currency_settings = await CurrencySettings.load()
+            amount = 1500
+            money_instance, created = await MoneyInstance.get_or_create(
+                player=player,
+                defaults={"amount": amount}
+            )
+            if not created:
+                money_instance.amount += amount
+                await money_instance.save(update_fields=("amount",))
+            currency_emoji = interaction.client.get_emoji(currency_settings.emoji_id)
+            if currency_emoji:
+                text += f"You get {currency_emoji} **{amount}** {currency_settings.display_name(amount)}!"
+            else:
+                text += f"You get **{amount}** {currency_settings.display_name(amount)}!"
 
         await interaction.followup.send(
-            self.view.get_catch_message(ball, has_caught_before, interaction.user.mention),
+            text,
             allowed_mentions=discord.AllowedMentions(users=player.can_be_mentioned),
         )
         await interaction.followup.edit_message(self.view.message.id, view=self.view)
@@ -429,7 +446,7 @@ class BallSpawnView(View):
         if new_ball:
             text += (
                 f"This is a **new {settings.collectible_name}** "
-                "that has been added to your completion!"
+                "that has been added to your completion!\n"
             )
         if self.ballinstance:
             text += f"This {settings.collectible_name} was dropped by <@{self.og_id}>\n"
