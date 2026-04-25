@@ -70,7 +70,7 @@ services:
       "
 
   postgres-db:
-    image: postgres:17
+    image: postgres
     restart: always
     hostname: postgres
     shm_size: 1g
