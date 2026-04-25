@@ -13,6 +13,6 @@ class ItemTransformer(TTLModelTransformer):
         return model.name
 
     async def load_items(self) -> Iterable[Item]:
-        return await Item.all().prefetch_related("special")
+        return await Item.all().prefetch_related("ball", "special")
 
 ItemTransform = app_commands.Transform[Item, ItemTransformer]

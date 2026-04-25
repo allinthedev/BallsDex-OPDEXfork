@@ -215,7 +215,7 @@ class Pack(commands.GroupCog):
             if currency_settings.emoji_id 
             else ""
         )
-        packs = await ItemModel.all().order_by("prize").prefetch_related("special")
+        packs = await ItemModel.all().order_by("prize").prefetch_related("ball", "special")
 
         if not packs:
             await interaction.followup.send(f"{settings.bot_name} doesn't have any packs to buy.")
@@ -232,16 +232,20 @@ class Pack(commands.GroupCog):
                 description = (
                     f"{pack.description}\n\n"
                     f"Price: **{currency_emoji} {pack.prize:,} {currency_settings.display_name(pack.prize)}**\n"
-                    f"Minimum Rarity: **{pack.minimum_rarity}**\n"
-                    f"Maximum Rarity: **{pack.maximum_rarity}**\n"
                     f"Special: **{pack.special.name if pack.special else 'Any'}**\n"
                 )
             else:
                 description = (
                     f"Price: **{currency_emoji} {pack.prize:,} {currency_settings.display_name(pack.prize)}**\n"
+                    f"Special: **{pack.special.name if pack.special else 'Any'}**\n"
+                )
+
+            if pack.ball:
+                description += f"{settings.collectible_name.title()}: **{pack.ball.country}**\n"
+            else:
+                description += (
                     f"Minimum Rarity: **{pack.minimum_rarity}**\n"
                     f"Maximum Rarity: **{pack.maximum_rarity}**\n"
-                    f"Special: **{pack.special.name if pack.special else 'Any'}**\n"
                 )
             
             entries.append(
@@ -271,7 +275,7 @@ class Pack(commands.GroupCog):
         """
         await interaction.response.defer(thinking=True, ephemeral=True)
         currency_settings = await CurrencySettings.load()
-        await pack.fetch_related("special")
+        await pack.fetch_related("ball", "special")
         player, _ = await Player.get_or_create(discord_id=interaction.user.id)
         instance, _ = await MoneyInstance.get_or_create(player=player)
         if instance.amount < pack.prize:
@@ -292,13 +296,17 @@ class Pack(commands.GroupCog):
         instance.amount -= pack.prize
         await instance.save(update_fields=("amount",))
 
-        balls = await Ball.filter(
-            enabled=True,
-            tradeable=True,
-            rarity__range=(pack.minimum_rarity, pack.maximum_rarity)
-        )
+        if pack.ball:
+            ball = pack.ball
+        else:
+            balls = await Ball.filter(
+                enabled=True,
+                tradeable=True,
+                rarity__range=(pack.minimum_rarity, pack.maximum_rarity)
+            )
+            ball = await self._get_random_countryball(balls)
+
         special = pack.special or self.get_random_special()
-        ball = await self._get_random_countryball(balls)
         rarity = ball.rarity
         instance = await BallInstance.create(
             player=player,
