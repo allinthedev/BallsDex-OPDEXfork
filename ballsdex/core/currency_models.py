@@ -1,14 +1,21 @@
 from tortoise import models, fields
-from .models import Player, Special
+from .models import Ball, Player, Special
 
 class Item(models.Model):
     name = fields.CharField(max_length=64)
     description = fields.TextField(null=True, description="An optional description for the item")
     prize = fields.BigIntField(null=True, description="The prize of the item. If blanks, it will free")
     emoji_id = fields.BigIntField(null=True, default=None)
-    minimum_rarity = fields.FloatField(description="Minimum rarity range.")
-    maximum_rarity = fields.FloatField(description="Maximum rarity range.")
+    minimum_rarity = fields.FloatField(description="Minimum rarity range.", null=True)
+    maximum_rarity = fields.FloatField(description="Maximum rarity range.", null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
+    ball: fields.ForeignKeyNullableRelation[Ball] = fields.ForeignKeyField(
+        "models.Ball",
+        on_delete=fields.SET_NULL,
+        null=True,
+        default=None,
+        description="A specific ball to give."
+    )
     special: fields.ForeignKeyNullableRelation[Special] = fields.ForeignKeyField(
         "models.Special",
         on_delete=fields.SET_NULL,

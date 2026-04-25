@@ -9,7 +9,7 @@ class ItemAdmin(admin.ModelAdmin):
     save_on_top = True
     fieldsets = [
         (None, {"fields": ["name", "description", "prize"]}),
-        ("Configure Reward", {"fields": ["minimum_rarity", "maximum_rarity", "special"]})
+        ("Configure Reward", {"fields": ["minimum_rarity", "maximum_rarity", "ball", "special"]})
     ]
     list_display = ("name", "prize", "minimum_rarity", "maximum_rarity")
     list_editable = ("prize", "minimum_rarity", "maximum_rarity")
