@@ -31,6 +31,8 @@ class CurrencySettings(models.Model):
     name = fields.CharField(max_length=64)
     plural_name = fields.CharField(max_length=64)
     emoji_id = fields.BigIntField(description="Emoji id of the currency", null=True)
+    spawn_chance = fields.FloatField(default=0.2, description="Value between 0 and 1, chances to spawn currency.")
+    spawn_amount = fields.IntField(default=500, description="The amount of currency to give from a spawn.")
 
     @classmethod
     async def load(cls):

@@ -9,6 +9,8 @@ class CurrencySettings(models.Model):
     name = models.CharField(max_length=64)
     plural_name = models.CharField(max_length=64)
     emoji_id = models.BigIntegerField(help_text="Emoji id of the currency", null=True, blank=True)
+    spawn_chance = models.FloatField(default=0.2, help_text="Value between 0 and 1, chances to spawn currency.")
+    spawn_amount = models.PositiveIntegerField(default=500, help_text="The amount of currency to give from a spawn.")
 
     class Meta:
         managed = True
