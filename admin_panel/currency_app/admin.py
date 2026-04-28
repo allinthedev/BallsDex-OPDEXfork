@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.http import HttpRequest
 
-from .models import CurrencySettings, Item, MoneyInstance
+from .models import CurrencySettings, Item, ItemBall, MoneyInstance
 
 @admin.register(Item)
 class ItemAdmin(admin.ModelAdmin):
@@ -9,7 +9,7 @@ class ItemAdmin(admin.ModelAdmin):
     save_on_top = True
     fieldsets = [
         (None, {"fields": ["name", "description", "prize"]}),
-        ("Configure Reward", {"fields": ["minimum_rarity", "maximum_rarity", "ball", "special"]})
+        ("Configure Reward", {"fields": ["minimum_rarity", "maximum_rarity", "special"]})
     ]
     list_display = ("name", "prize", "minimum_rarity", "maximum_rarity")
     list_editable = ("prize", "minimum_rarity", "maximum_rarity")
@@ -17,6 +17,18 @@ class ItemAdmin(admin.ModelAdmin):
     ordering = ["-created_at"]
 
     search_fields = ("name",)
+
+@admin.register(ItemBall)
+class ItemBallAdmin(admin.ModelAdmin):
+    list_display = ("item_name", "ball_name")
+
+    @admin.display(description="Name of Item")
+    def item_name(self, obj: ItemBall):
+        return obj.item.name
+
+    @admin.display(description="Name of Ball")
+    def ball_name(self, obj: ItemBall):
+        return obj.ball.country
 
 @admin.register(CurrencySettings)
 class CurrencySettingsAdmin(admin.ModelAdmin):

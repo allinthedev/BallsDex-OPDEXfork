@@ -98,13 +98,13 @@ class CountryballNamePrompt(Modal, title=f"Catch this {settings.collectible_name
             )
             return
 
+        currency_settings = await CurrencySettings.load()
         ball, has_caught_before = await self.view.catch_ball(
             interaction.user, player=player, guild=interaction.guild
         )
         text = self.view.get_catch_message(ball, has_caught_before, interaction.user.mention)
-        if random.random() < 0.65:
-            currency_settings = await CurrencySettings.load()
-            amount = 1500
+        if random.random() < currency_settings.spawn_chance:
+            amount = currency_settings.spawn_amount
             money_instance, created = await MoneyInstance.get_or_create(
                 player=player,
                 defaults={"amount": amount}
