@@ -44,7 +44,7 @@ class ShopMenuSource(menus.ListPageSource):
         
         countryballs = await page.balls.all()
         if countryballs:
-            description += f"# {settings.plural_collectible_name.title()}\n"
+            description += f"# Possible {settings.plural_collectible_name.title()}\n"
             for countryball in countryballs:
                 emoji = self.bot.get_emoji(countryball.cached_ball.emoji_id)
                 if emoji:
