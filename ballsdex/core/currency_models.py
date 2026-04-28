@@ -1,5 +1,5 @@
 from tortoise import models, fields
-from .models import Ball, Player, Special
+from .models import Ball, Player, Special, balls
 
 class Item(models.Model):
     name = fields.CharField(max_length=64)
@@ -9,13 +9,6 @@ class Item(models.Model):
     minimum_rarity = fields.FloatField(description="Minimum rarity range.", null=True)
     maximum_rarity = fields.FloatField(description="Maximum rarity range.", null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
-    ball: fields.ForeignKeyNullableRelation[Ball] = fields.ForeignKeyField(
-        "models.Ball",
-        on_delete=fields.SET_NULL,
-        null=True,
-        default=None,
-        description="A specific ball to give."
-    )
     special: fields.ForeignKeyNullableRelation[Special] = fields.ForeignKeyField(
         "models.Special",
         on_delete=fields.SET_NULL,
@@ -23,9 +16,28 @@ class Item(models.Model):
         default=None,
         description="The special of the item (optional)"
     )
+    balls: fields.BackwardFKRelation["ItemBall"]
 
     def __str__(self) -> str:
         return self.name
+
+
+class ItemBall(models.Model):
+    item: fields.ForeignKeyRelation[Item] = fields.ForeignKeyField(
+        "models.Item",
+        on_delete=fields.CASCADE,
+        related_name="balls"
+    )
+    ball: fields.ForeignKeyRelation[Ball] = fields.ForeignKeyField(
+        "models.Ball",
+        on_delete=fields.CASCADE,
+    )
+    ball_id: int
+
+    @property
+    def cached_ball(self) -> Ball:
+        return balls.get(self.ball_id, self.ball)
+
 
 class CurrencySettings(models.Model):
     name = fields.CharField(max_length=64)

@@ -33,12 +33,10 @@ class Item(models.Model):
     minimum_rarity = models.FloatField(help_text="Minimum rarity range.", blank=True, null=True)
     maximum_rarity = models.FloatField(help_text="Maximum rarity range.", blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True, editable=False)
-    ball = models.ForeignKey(
-        Ball, on_delete=models.SET_NULL, blank=True, null=True, help_text="A specific ball to give."
-    )
     special = models.ForeignKey(
         Special, on_delete=models.SET_NULL, blank=True, null=True, help_text="The special of the item (optional)"
     )
+    balls: models.QuerySet["ItemBall"]
 
     def save(
         self,
@@ -47,20 +45,9 @@ class Item(models.Model):
         using: str | None = None,
         update_fields: Iterable[str] | None = None,
     ) -> None:
-        has_ball = self.ball is not None
         has_min = self.minimum_rarity is not None
         has_max = self.maximum_rarity is not None
         has_rarity = has_min or has_max
-
-        if not has_ball and not has_rarity:
-            raise ValidationError(
-                "You must provide either a ball or a rarity range."
-            )
-
-        if has_ball and has_rarity:
-            raise ValidationError(
-                "You cannot set both a ball and a rarity range."
-            )
 
         if has_rarity and not (has_min and has_max):
             raise ValidationError(
@@ -80,6 +67,36 @@ class Item(models.Model):
 
     def __str__(self) -> str:
         return self.name
+
+
+class ItemBall(models.Model):
+    item = models.ForeignKey(
+        Item,
+        on_delete=models.CASCADE,
+        related_name="balls"
+    )
+    ball = models.ForeignKey(
+        Ball,
+        on_delete=models.CASCADE,
+    )
+
+    def save(
+        self,
+        force_insert: bool = False,
+        force_update: bool = False,
+        using: str | None = None,
+        update_fields: Iterable[str] | None = None,
+    ) -> None:
+        has_rarity = self.item.minimum_rarity and self.item.maximum_rarity
+        if has_rarity:
+            raise ValidationError("You must define null `minimum_rarity` and `maximum_rarity` in the original item.")
+
+        return super().save(force_insert, force_update, using, update_fields)
+
+    class Meta:
+        managed = True
+        db_table = "itemball"
+
 
 class MoneyInstance(models.Model):
     player = models.OneToOneField(Player, on_delete=models.CASCADE)

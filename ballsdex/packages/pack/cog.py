@@ -17,9 +17,10 @@ from tortoise.timezone import now as tortoise_now
 from ballsdex.core.models import Ball, BallInstance, Special, Player, specials
 from ballsdex.core.pack_models import PackResource
 from ballsdex.core.currency_models import CurrencySettings, Item as ItemModel, MoneyInstance
-from ballsdex.packages.admin.cog import FieldPageSource, Pages
+from ballsdex.packages.admin.cog import Pages
 from ballsdex.settings import settings
 
+from .components import ShopMenuSource
 from .item_types import Item, ItemType
 from .transformers import ItemTransform
 
@@ -210,54 +211,13 @@ class Pack(commands.GroupCog):
         """
         await interaction.response.defer(thinking=True)
         currency_settings = await CurrencySettings.load()
-        currency_emoji = (
-            self.bot.get_emoji(currency_settings.emoji_id) 
-            if currency_settings.emoji_id 
-            else ""
-        )
-        packs = await ItemModel.all().order_by("prize").prefetch_related("ball", "special")
+        packs = await ItemModel.all().order_by("prize").prefetch_related("balls", "special")
 
         if not packs:
             await interaction.followup.send(f"{settings.bot_name} doesn't have any packs to buy.")
             return
         
-        entries: list[tuple[str, str]] = []
-        for pack in packs:
-            if pack.emoji_id:
-                emoji = str(self.bot.get_emoji(pack.emoji_id))
-            else:
-                emoji = ""
-        
-            if pack.description:
-                description = (
-                    f"{pack.description}\n\n"
-                    f"Price: **{currency_emoji} {pack.prize:,} {currency_settings.display_name(pack.prize)}**\n"
-                    f"Special: **{pack.special.name if pack.special else 'Any'}**\n"
-                )
-            else:
-                description = (
-                    f"Price: **{currency_emoji} {pack.prize:,} {currency_settings.display_name(pack.prize)}**\n"
-                    f"Special: **{pack.special.name if pack.special else 'Any'}**\n"
-                )
-
-            if pack.ball:
-                description += f"{settings.collectible_name.title()}: **{pack.ball.country}**\n"
-            else:
-                description += (
-                    f"Minimum Rarity: **{pack.minimum_rarity}**\n"
-                    f"Maximum Rarity: **{pack.maximum_rarity}**\n"
-                )
-            
-            entries.append(
-                (
-                    f"{emoji} {pack.name}",
-                    description
-                )
-            )
-        
-        source = FieldPageSource(entries, per_page=5)
-        source.embed.title = "Available Packs"
-
+        source = ShopMenuSource(packs, self.bot, currency_settings)
         pages = Pages(source, interaction=interaction, compact=True)
         await pages.start()
     
@@ -275,16 +235,15 @@ class Pack(commands.GroupCog):
         """
         await interaction.response.defer(thinking=True, ephemeral=True)
         currency_settings = await CurrencySettings.load()
-        await pack.fetch_related("ball", "special")
         player, _ = await Player.get_or_create(discord_id=interaction.user.id)
         instance, _ = await MoneyInstance.get_or_create(player=player)
+        currency_emoji = (
+            self.bot.get_emoji(currency_settings.emoji_id) 
+            if currency_settings.emoji_id 
+            else ""
+        )
         if instance.amount < pack.prize:
             emoji = self.bot.get_emoji(pack.emoji_id) if pack.emoji_id else ""
-            currency_emoji = (
-                self.bot.get_emoji(currency_settings.emoji_id) 
-                if currency_settings.emoji_id 
-                else ""
-            )
             await interaction.followup.send(
                 f"You don't enough {currency_emoji} {currency_settings.name} to buy "
                 f"**{emoji} {pack.name}**\n"
@@ -296,8 +255,28 @@ class Pack(commands.GroupCog):
         instance.amount -= pack.prize
         await instance.save(update_fields=("amount",))
 
-        if pack.ball:
-            ball = pack.ball
+        balls = await pack.balls.all()
+        special = pack.special or self.get_random_special()
+        if balls:
+            instances = [
+                BallInstance(
+                    player=player, 
+                    ball=ball.cached_ball, 
+                    special=special,
+                    health_bonus=random.randint(-settings.max_health_bonus, settings.max_health_bonus),
+                    attack_bonus=random.randint(-settings.max_attack_bonus, settings.max_attack_bonus)
+                )
+                for ball in balls
+            ]
+            await BallInstance.bulk_create(instances)
+
+            balls_txt = ", ".join(f"**{x.countryball.country}**" for x in instances)
+            prize_txt = (
+                f"{currency_emoji} {pack.prize:,} {currency_settings.display_name(pack.prize)}"
+                if pack.prize
+                else "free"
+            )
+            await interaction.followup.send(f"You've got {balls_txt} for {prize_txt}")
         else:
             balls = await Ball.filter(
                 enabled=True,
@@ -305,41 +284,39 @@ class Pack(commands.GroupCog):
                 rarity__range=(pack.minimum_rarity, pack.maximum_rarity)
             )
             ball = await self._get_random_countryball(balls)
-
-        special = pack.special or self.get_random_special()
-        rarity = ball.rarity
-        instance = await BallInstance.create(
-            player=player,
-            ball=ball,
-            special=special,
-            health_bonus=random.randint(-settings.max_health_bonus, settings.max_health_bonus),
-            attack_bonus=random.randint(-settings.max_attack_bonus, settings.max_attack_bonus),
-        )
-        embed = discord.Embed(title=f"🎁 You got {ball.country}!", color=discord.Color.gold())
-        desc = f"📖 **Rarity:** {rarity}\n"
-        rarities = [x for x in items if x["name"] == ball.country]
-        for item in rarities:
-            if item["type"] == ItemType.Crew:
-                desc +=  f"🏴‍☠️ **Crew Rarity:** {item["rarity"]}\n"
-            elif item["type"] == ItemType.Fruit:
-                desc += f"🍎 **Fruit Rarity:** {item["rarity"]}\n"
-            elif item["type"] == ItemType.Ship:
-                desc += f"🚢 **Ship Rarity:** {item["rarity"]}\n"
-            elif item["type"] == ItemType.Weapon:
-                desc += f"⚔️ **Weapon Rarity:** {item["rarity"]}\n"
-        if special:
-            desc += f"⚡ **Special:** {special.name}\n"
-        desc += (
-            f"❤️ **Health:** {ball.health}\n"
-            f"⚔️ **Attack:** {ball.attack}\n"
-        )
-        embed.description = desc
-        embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
-        with ThreadPoolExecutor() as pool:
-            buffer = await interaction.client.loop.run_in_executor(pool, instance.draw_card)
-        file = discord.File(buffer, "card.webp")
-        embed.set_image(url="attachment://card.webp")
-        await interaction.followup.send(embed=embed, file=file)
+            rarity = ball.rarity
+            instance = await BallInstance.create(
+                player=player,
+                ball=ball,
+                special=special,
+                health_bonus=random.randint(-settings.max_health_bonus, settings.max_health_bonus),
+                attack_bonus=random.randint(-settings.max_attack_bonus, settings.max_attack_bonus),
+            )
+            embed = discord.Embed(title=f"🎁 You got {ball.country}!", color=discord.Color.gold())
+            desc = f"📖 **Rarity:** {rarity}\n"
+            rarities = [x for x in items if x["name"] == ball.country]
+            for item in rarities:
+                if item["type"] == ItemType.Crew:
+                    desc +=  f"🏴‍☠️ **Crew Rarity:** {item["rarity"]}\n"
+                elif item["type"] == ItemType.Fruit:
+                    desc += f"🍎 **Fruit Rarity:** {item["rarity"]}\n"
+                elif item["type"] == ItemType.Ship:
+                    desc += f"🚢 **Ship Rarity:** {item["rarity"]}\n"
+                elif item["type"] == ItemType.Weapon:
+                    desc += f"⚔️ **Weapon Rarity:** {item["rarity"]}\n"
+            if special:
+                desc += f"⚡ **Special:** {special.name}\n"
+            desc += (
+                f"❤️ **Health:** {ball.health}\n"
+                f"⚔️ **Attack:** {ball.attack}\n"
+            )
+            embed.description = desc
+            embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+            with ThreadPoolExecutor() as pool:
+                buffer = await interaction.client.loop.run_in_executor(pool, instance.draw_card)
+            file = discord.File(buffer, "card.webp")
+            embed.set_image(url="attachment://card.webp")
+            await interaction.followup.send(embed=embed, file=file)
 
     @app_commands.command()
     @app_commands.checks.cooldown(1, 86400, key=lambda i: i.user.id)
