@@ -11,7 +11,8 @@ class PackResource(models.Model):
         on_delete=fields.CASCADE, 
         related_name="pack_resource"
     )
-    uses = fields.IntField(default=0)
+    daily_uses = fields.IntField(default=0)
+    weekly_uses = fields.IntField(default=0)
     daily_cooldown = fields.DatetimeField(null=True)
     weekly_cooldown = fields.DatetimeField(null=True)
 
@@ -25,12 +26,13 @@ class PackResource(models.Model):
     
     async def remove_daily_cooldown(self):
         self.daily_cooldown = None
-        self.uses = 0
-        await self.save(update_fields=("daily_cooldown", "uses"))
+        self.daily_uses = 0
+        await self.save(update_fields=("daily_cooldown", "daily_uses"))
     
     async def remove_weekly_cooldown(self):
         self.weekly_cooldown = None
-        await self.save(update_fields=("weekly_cooldown",))
+        self.weekly_uses = 0
+        await self.save(update_fields=("weekly_cooldown", "weekly_uses"))
 
     async def is_daily_on_cooldown(self) -> bool:
         await self.refresh_from_db(fields=("daily_cooldown",))
