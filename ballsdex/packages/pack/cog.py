@@ -90,10 +90,10 @@ class Pack(commands.GroupCog):
 
         if resource.daily_cooldown is not None:
             await resource.remove_daily_cooldown()
-        resource.uses += 1
-        await resource.save(update_fields=("uses",))
-        if resource.uses >= 3:
+        if resource.daily_uses + 1 >= 3:
             await resource.set_daily_cooldown()
+        resource.daily_uses += 1
+        await resource.save(update_fields=("daily_uses",))
         await interaction.response.defer()
         balls = await Ball.filter(
             enabled=True,
@@ -127,9 +127,9 @@ class Pack(commands.GroupCog):
         embed.description = desc
         embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
         footer_text = (
-            f"Uses: {resource.uses}/3. Come back tomorrow." 
-            if resource.uses >= 3 
-            else f"Uses: {resource.uses}/3."
+            f"Uses: {resource.daily_uses}/3. Come back tomorrow." 
+            if resource.daily_uses >= 3 
+            else f"Uses: {resource.daily_uses}/3."
         )
         embed.set_footer(text=footer_text)
         with ThreadPoolExecutor() as pool:
@@ -161,10 +161,10 @@ class Pack(commands.GroupCog):
 
         if resource.weekly_cooldown is not None:
             await resource.remove_weekly_cooldown()
-        resource.uses += 1
-        await resource.save(update_fields=("uses",))
-        if resource.uses >= 3:
+        if resource.weekly_uses + 1 >= 1:
             await resource.set_weekly_cooldown()
+        resource.weekly_uses += 1
+        await resource.save(update_fields=("weekly_uses",))
         await interaction.response.defer()
         balls = await Ball.filter(
             enabled=True,

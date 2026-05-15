@@ -17,6 +17,7 @@ build
 venv
 .venv
 .python-version
+uv.lock
 
 # Visual Studio code settings
 .vscode

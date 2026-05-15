@@ -103,20 +103,21 @@ class CountryballNamePrompt(Modal, title=f"Catch this {settings.collectible_name
             interaction.user, player=player, guild=interaction.guild
         )
         text = self.view.get_catch_message(ball, has_caught_before, interaction.user.mention)
-        if random.random() < currency_settings.spawn_chance:
-            amount = currency_settings.spawn_amount
-            money_instance, created = await MoneyInstance.get_or_create(
-                player=player,
-                defaults={"amount": amount}
-            )
-            if not created:
-                money_instance.amount += amount
-                await money_instance.save(update_fields=("amount",))
-            currency_emoji = interaction.client.get_emoji(currency_settings.emoji_id)
-            if currency_emoji:
-                text += f"You get {currency_emoji} **{amount}** {currency_settings.display_name(amount)}!"
-            else:
-                text += f"You get **{amount}** {currency_settings.display_name(amount)}!"
+        if self.view.ballinstance is None:
+            if random.random() < currency_settings.spawn_chance:
+                amount = currency_settings.spawn_amount
+                money_instance, created = await MoneyInstance.get_or_create(
+                    player=player,
+                    defaults={"amount": amount}
+                )
+                if not created:
+                    money_instance.amount += amount
+                    await money_instance.save(update_fields=("amount",))
+                currency_emoji = interaction.client.get_emoji(currency_settings.emoji_id)
+                if currency_emoji:
+                    text += f"You get {currency_emoji} **{amount}** {currency_settings.display_name(amount)}!"
+                else:
+                    text += f"You get **{amount}** {currency_settings.display_name(amount)}!"
 
         await interaction.followup.send(
             text,
