@@ -245,7 +245,7 @@ class Pack(commands.GroupCog):
         if instance.amount < pack.prize:
             emoji = self.bot.get_emoji(pack.emoji_id) if pack.emoji_id else ""
             await interaction.followup.send(
-                f"You don't enough {currency_emoji} {currency_settings.name} to buy "
+                f"You don't have enough {currency_emoji} {currency_settings.name} to buy "
                 f"**{emoji} {pack.name}**\n"
                 f"Your actual balance: "
                 f"**{currency_emoji} {instance.amount:,} {currency_settings.display_name(instance.amount)}**"
