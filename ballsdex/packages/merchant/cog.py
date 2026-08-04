@@ -194,7 +194,7 @@ class Merchant(commands.GroupCog):
                 else ""
             )
             await interaction.followup.send(
-                f"You don't enough {currency_emoji} {currency_settings.name} to buy "
+                f"You don't have enough {currency_emoji} {currency_settings.name} to buy "
                 f"**{item.name}**\n"
                 f"Your actual balance: {await self.format_price(money_instance.amount)}"
             )
@@ -268,7 +268,7 @@ class Merchant(commands.GroupCog):
         amount: int = 1
     ):
         """
-        Convert a token into coins.
+        Convert a token into berries.
 
         Parameters
         ----------
