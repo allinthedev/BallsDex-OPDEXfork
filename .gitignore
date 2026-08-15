@@ -29,8 +29,9 @@ venv
 pgbackups
 pre-migration-data-dump.sql
 final-data-dump.sql
-data-dump.sql
 backup_opdex.zip
+*.sql
+*.sql.gz
 
 # static
 static

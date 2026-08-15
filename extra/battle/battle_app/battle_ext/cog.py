@@ -11,6 +11,7 @@ from discord.ui import View
 
 from ballsdex.core.utils.transformers import BallInstanceTransform
 from bd_models.models import Player
+from settings.models import settings
 
 from ..models import Buff
 from .xe_battle_lib import BattleBall, BattleInstance, gen_battle
@@ -213,7 +214,6 @@ class Battle(commands.GroupCog):
             await notify_user(
                 unlocked,
                 user=guild_battle.author if p1_total_hp >= p2_total_hp else guild_battle.opponent,
-                channel=message.channel,
             )
             self.battles[interaction.channel_id] = None
 
@@ -229,7 +229,7 @@ class Battle(commands.GroupCog):
             del_cmd = self.remove.extras.get("mention", "`/battle remove`")
             embed = discord.Embed(
                 title="Battle Plan",
-                description=f"Add or remove items you want to propose to the other player using the {add_cmd} and {del_cmd} commands. Remember, you may add up to **{max_size}** items in a deck for this battle. Once you've finished, click the tick button to start the battle.",
+                description=f"Add or remove items you want to propose to the other player using the {add_cmd} and {del_cmd} commands. Remember, you may add up to **{guild_battle.deck_size}** items in a deck for this battle. Once you've finished, click the tick button to start the battle.",
                 color=discord.Colour.blurple(),
             )
 
@@ -278,6 +278,11 @@ class Battle(commands.GroupCog):
         """
         Start a new battle with a chosen user.
         """
+        if max_size < 1:
+            await interaction.response.send_message(
+                f"You must allow at least 1 {settings.collectible_name} in the deck!", ephemeral=True
+            )
+            return
         if self.battles.get(interaction.channel_id):
             await interaction.response.send_message(
                 "You cannot start a new battle right now, as one is already ongoing in this server.", ephemeral=True
@@ -332,7 +337,8 @@ class Battle(commands.GroupCog):
 
         if len(user_balls) >= guild_battle.deck_size:
             await interaction.response.send_message(
-                f"You cannot add more than {guild_battle.deck_size} balls!", ephemeral=True
+                f"You cannot add more than {guild_battle.deck_size} {settings.plural_collectible_name}!",
+                ephemeral=True,
             )
             return
 
@@ -346,7 +352,9 @@ class Battle(commands.GroupCog):
         )
 
         if ball in user_balls:
-            await interaction.response.send_message("You cannot add the same ball twice!", ephemeral=True)
+            await interaction.response.send_message(
+                f"You cannot add the same {settings.collectible_name} twice!", ephemeral=True
+            )
             return
         user_balls.append(ball)
 
@@ -385,7 +393,8 @@ class Battle(commands.GroupCog):
             interaction.user == guild_battle.opponent and guild_battle.opponent_ready
         ):
             await interaction.response.send_message(
-                "You cannot change your balls as you are already ready.", ephemeral=True
+                f"You cannot change your {settings.plural_collectible_name} as you are already ready.",
+                ephemeral=True,
             )
             return
 
@@ -430,4 +439,6 @@ class Battle(commands.GroupCog):
                 )
             )
         else:
-            await interaction.response.send_message(f"That ball is not in your deck!", ephemeral=True)
+            await interaction.response.send_message(
+                f"That {settings.collectible_name} is not in your deck!", ephemeral=True
+            )

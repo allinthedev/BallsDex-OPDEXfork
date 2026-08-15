@@ -7,7 +7,7 @@ from django.dispatch import receiver
 
 from achievement_app import models
 from achievement_app.models import AchievementType, notify_user, progress_achievement
-from bd_models.models import BallInstance, GuildConfig, Player
+from bd_models.models import BallInstance, Player
 
 logger = logging.getLogger(__name__)
 
@@ -42,15 +42,6 @@ async def _handle_created_ballinstance(instance: BallInstance, notify: bool = Tr
 
     if unlocked and notify and models._BOT is not None:
         user = await models._BOT.fetch_user(player.discord_id)
-        if instance.server_id:
-            guild = await models._BOT.fetch_guild(instance.server_id)
-            config = await GuildConfig.objects.aget_or_none(guild_id=instance.server_id)
-            if not config or not config.spawn_channel:
-                await notify_user(unlocked, user=user)
-                return unlocked
-            channel = await guild.fetch_channel(config.spawn_channel)
-            await notify_user(unlocked, user=user, channel=channel)  # type: ignore
-        else:
-            await notify_user(unlocked, user=user)
+        await notify_user(unlocked, user=user)
 
     return unlocked

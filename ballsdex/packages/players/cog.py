@@ -138,10 +138,10 @@ class Player(commands.GroupCog):
         p2_unlocked += await progress_achievement(player2, AchievementType.HAVE_FRIEND)
 
         if p1_unlocked:
-            await notify_user(p1_unlocked, user=interaction.user, channel=interaction.channel)  # type: ignore
+            await notify_user(p1_unlocked, user=interaction.user)
 
         if p2_unlocked:
-            await notify_user(p2_unlocked, user=user, channel=interaction.channel)  # type: ignore
+            await notify_user(p2_unlocked, user=user)
         self.active_friend_requests[(player1.discord_id, player2.discord_id)] = False
 
     @friend.command(name="remove")

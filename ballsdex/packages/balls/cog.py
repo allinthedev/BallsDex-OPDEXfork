@@ -53,7 +53,7 @@ class DuplicateSort(enum.Enum):
     rarity_reverse = "-rarity"
 
 
-class Balls(commands.GroupCog, group_name=settings.balls_slash_name):
+class Balls(commands.GroupCog, name=settings.balls_slash_name.capitalize(), group_name=settings.balls_slash_name):
     """
     View and manage your countryballs collection.
     """

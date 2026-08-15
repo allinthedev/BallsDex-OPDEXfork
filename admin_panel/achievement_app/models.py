@@ -12,8 +12,6 @@ from settings.models import settings
 from settings.utils import format_currency
 
 if TYPE_CHECKING:
-    from discord.abc import MessageableChannel
-
     from ballsdex.core.bot import BallsDexBot
 
 _BOT: "BallsDexBot | None" = None
@@ -233,11 +231,9 @@ async def progress_achievement(
     return unlocked
 
 
-async def notify_user(
-    achievements: list[Achievement], *, user: discord.abc.User | None = None, channel: MessageableChannel | None = None
-):
-    if not user and not channel:
-        raise RuntimeError("You must provide at least one of 'user' or 'channel'.")
+async def notify_user(achievements: list[Achievement], *, user: discord.abc.User):
+    if not achievements:
+        return
 
     container = Container()
     container.add_item(TextDisplay("# New Achievement(s) Unlocked!"))
@@ -266,22 +262,9 @@ async def notify_user(
     if remaining > 0:
         container.add_item(TextDisplay(f"...and **{remaining}** more achievement(s)."))
 
-    if channel:
-        try:
-            view = LayoutView()
-            if user:
-                view.add_item(TextDisplay(user.mention))
-            view.add_item(container)
-            await channel.send(view=view)
-            return
-        except (discord.HTTPException, discord.Forbidden):
-            pass
-
-    if user:
-        try:
-            view = LayoutView()
-            view.add_item(container)
-            await user.send(view=view)
-            return
-        except (discord.HTTPException, discord.Forbidden):
-            pass
+    try:
+        view = LayoutView()
+        view.add_item(container)
+        await user.send(view=view)
+    except (discord.HTTPException, discord.Forbidden):
+        pass
