@@ -254,7 +254,7 @@ async def notify_user(
             if achievement.description:
                 text.content += f"{achievement.description}\n"
             if achievement.currency_reward:
-                text.content += format_currency(achievement.currency_reward, False)
+                text.content += format_currency(achievement.currency_reward, False, _BOT)
             section.add_item(text)
             container.add_item(section)
         else:
@@ -262,7 +262,7 @@ async def notify_user(
             if achievement.description:
                 text.content += f"{achievement.description}\n"
             if achievement.currency_reward:
-                text.content += format_currency(achievement.currency_reward, False)
+                text.content += format_currency(achievement.currency_reward, False, _BOT)
             container.add_item(text)
 
     remaining = len(achievements) - len(achievements[:5])
