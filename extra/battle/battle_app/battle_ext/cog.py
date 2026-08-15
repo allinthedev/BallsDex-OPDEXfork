@@ -214,6 +214,7 @@ class Battle(commands.GroupCog):
             await notify_user(
                 unlocked,
                 user=guild_battle.author if p1_total_hp >= p2_total_hp else guild_battle.opponent,
+                channel=message.channel,
             )
             self.battles[interaction.channel_id] = None
 
