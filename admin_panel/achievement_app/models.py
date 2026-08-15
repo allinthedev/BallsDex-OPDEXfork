@@ -239,6 +239,9 @@ async def notify_user(
     if not user and not channel:
         raise RuntimeError("You must provide at least one of 'user' or 'channel'.")
 
+    if not achievements:
+        return
+
     container = Container()
     container.add_item(TextDisplay("# New Achievement(s) Unlocked!"))
     container.add_item(Separator())
@@ -282,6 +285,5 @@ async def notify_user(
             view = LayoutView()
             view.add_item(container)
             await user.send(view=view)
-            return
         except (discord.HTTPException, discord.Forbidden):
             pass

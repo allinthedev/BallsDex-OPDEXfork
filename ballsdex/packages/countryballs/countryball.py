@@ -446,7 +446,7 @@ class BallSpawnView(LayoutView):
         if not special:
             special = self.get_random_special()
 
-        ball = await BallInstance.objects.acreate(
+        ball = BallInstance(
             ball=self.model,
             player=player,
             special=special,
@@ -456,6 +456,10 @@ class BallSpawnView(LayoutView):
             spawned_time=self.message.created_at,
             catch_date=caught_time,
         )
+        # transient attribute, read by the achievement post_save signal to notify in the
+        # channel the catch actually happened in, instead of a guild's configured spawn channel
+        ball._catch_channel_id = self.message.channel.id  # type: ignore
+        await ball.asave()
 
         # logging and stats
         log.log(

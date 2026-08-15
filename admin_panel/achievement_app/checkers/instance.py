@@ -1,5 +1,6 @@
 import logging
 
+import discord
 from asgiref.sync import async_to_sync
 from django.db import transaction
 from django.db.models.signals import post_save
@@ -42,15 +43,20 @@ async def _handle_created_ballinstance(instance: BallInstance, notify: bool = Tr
 
     if unlocked and notify and models._BOT is not None:
         user = await models._BOT.fetch_user(player.discord_id)
-        if instance.server_id:
-            guild = await models._BOT.fetch_guild(instance.server_id)
-            config = await GuildConfig.objects.aget_or_none(guild_id=instance.server_id)
-            if not config or not config.spawn_channel:
-                await notify_user(unlocked, user=user)
-                return unlocked
-            channel = await guild.fetch_channel(config.spawn_channel)
-            await notify_user(unlocked, user=user, channel=channel)  # type: ignore
-        else:
-            await notify_user(unlocked, user=user)
+        channel = None
+        try:
+            catch_channel_id = getattr(instance, "_catch_channel_id", None)
+            if catch_channel_id:
+                channel = models._BOT.get_channel(catch_channel_id) or await models._BOT.fetch_channel(
+                    catch_channel_id
+                )
+            elif instance.server_id:
+                config = await GuildConfig.objects.aget_or_none(guild_id=instance.server_id)
+                if config and config.spawn_channel:
+                    guild = await models._BOT.fetch_guild(instance.server_id)
+                    channel = await guild.fetch_channel(config.spawn_channel)
+        except (discord.HTTPException, discord.Forbidden):
+            channel = None
+        await notify_user(unlocked, user=user, channel=channel)  # type: ignore
 
     return unlocked
