@@ -1,6 +1,9 @@
 import logging
 from typing import TYPE_CHECKING
 
+from discord import app_commands
+from settings.models import settings
+
 from .commands import commands
 from .groups import groups
 
@@ -16,20 +19,20 @@ def walk_commands():
 
 
 async def setup(bot: "BallsDexBot"):
-    balls_cog = bot.get_cog("Balls")
-    if not balls_cog or not balls_cog.app_command:
+    group = bot.tree.get_command(settings.balls_slash_name)
+    if not group or not isinstance(group, app_commands.Group):
         log.error("Failed to load balls extension commands.")
         return
 
     for command in walk_commands():
-        balls_cog.app_command.add_command(command)
+        group.add_command(command)
 
 
 async def teardown(bot: "BallsDexBot"):
-    balls_cog = bot.get_cog("Balls")
+    group = bot.tree.get_command(settings.balls_slash_name)
 
-    if not balls_cog or not balls_cog.app_command:
+    if not group or not isinstance(group, app_commands.Group):
         return
 
     for command in walk_commands():
-        balls_cog.app_command.remove_command(command.name)
+        group.remove_command(command.name)
