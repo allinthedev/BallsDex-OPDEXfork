@@ -168,7 +168,9 @@ class Achievement(commands.GroupCog):
             if achievement.description:
                 section.add_item(TextDisplay(achievement.description))
             if achievement.currency_reward:
-                section.add_item(TextDisplay(f"**Reward:** {achievement.currency_reward}"))
+                section.add_item(
+                    TextDisplay(f"**Reward:** {format_currency(achievement.currency_reward, False, self.bot)}")
+                )
             if user_achievement.completed_at:
                 section.add_item(TextDisplay(f"**Unlocked at:** {format_dt(user_achievement.completed_at)}"))
             else:
@@ -178,7 +180,9 @@ class Achievement(commands.GroupCog):
             if achievement.description:
                 container.add_item(TextDisplay(achievement.description))
             if achievement.currency_reward:
-                container.add_item(TextDisplay(f"**Reward:** {achievement.currency_reward}"))
+                container.add_item(
+                    TextDisplay(f"**Reward:** {format_currency(achievement.currency_reward, False, self.bot)}")
+                )
             if user_achievement.completed_at:
                 container.add_item(TextDisplay(f"**Unlocked at:** {format_dt(user_achievement.completed_at)}"))
             else:
