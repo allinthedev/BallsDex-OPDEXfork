@@ -19,6 +19,14 @@ class VoteSettings(models.Model):
         blank=True,
         default="",
     )
+    top_gg_stats_token = models.CharField(
+        max_length=255,
+        help_text="Your bot's API token from Top.gg (Webhooks tab). Used by the "
+        "'post_topgg_stats' management command to push the current server count. "
+        "Leave empty to skip posting stats.",
+        blank=True,
+        default="",
+    )
     min_rarity = models.FloatField(help_text="Lowest rarity that can be granted as a vote reward.", default=1.0)
     max_rarity = models.FloatField(help_text="Highest rarity that can be granted as a vote reward.", default=100.0)
     special_chance = models.FloatField(
