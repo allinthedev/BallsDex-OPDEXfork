@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import aiohttp
 from django.core.management.base import BaseCommand, CommandError
@@ -21,14 +22,27 @@ async def fetch_guild_count(bot_token: str) -> int:
             params = {"limit": "200"}
             if after:
                 params["after"] = after
-            async with session.get(f"{DISCORD_API}/users/@me/guilds", params=params) as resp:
-                if resp.status != 200:
-                    raise CommandError(f"Discord API returned {resp.status}: {await resp.text()}")
-                page = await resp.json()
+
+            while True:
+                async with session.get(f"{DISCORD_API}/users/@me/guilds", params=params) as resp:
+                    if resp.status == 429:
+                        body = await resp.text()
+                        try:
+                            retry_after = json.loads(body).get("retry_after", 1.0)
+                        except json.JSONDecodeError:
+                            retry_after = 1.0
+                        await asyncio.sleep(float(retry_after) + 0.1)
+                        continue
+                    if resp.status != 200:
+                        raise CommandError(f"Discord API returned {resp.status}: {await resp.text()}")
+                    page = await resp.json()
+                    break
+
             count += len(page)
             if len(page) < 200:
                 break
             after = page[-1]["id"]
+            await asyncio.sleep(0.5)  # stay comfortably under the rate limit between pages
 
     return count
 
