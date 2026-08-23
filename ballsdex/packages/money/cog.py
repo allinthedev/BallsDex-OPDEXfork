@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING
 
 import discord
 from asgiref.sync import sync_to_async
+from currency_app.models import CurrencySettings, DailyBonusRole
 from discord import app_commands
 from discord.ext import commands
 from discord.utils import format_dt
@@ -109,22 +110,57 @@ class Money(commands.GroupCog):
         """
         await interaction.response.defer(thinking=True, ephemeral=True)
         player, _ = await Player.objects.aget_or_create(discord_id=interaction.user.id)
+        now = timezone.now()
+
         raw_cooldown = player.extra_data.get("berry_daily_cooldown", None)
         cooldown = datetime.fromisoformat(raw_cooldown) if raw_cooldown else None
-        if cooldown is not None:
-            now = timezone.now()
-            if cooldown >= now:
-                await interaction.followup.send(
-                    f"You've already claimed the daily payment. Come back in {format_dt(cooldown, 'R')}"
-                )
-                return
+        if cooldown is not None and cooldown >= now:
+            await interaction.followup.send(
+                f"You've already claimed the daily payment. Come back in {format_dt(cooldown, 'R')}"
+            )
+            return
 
-        player.extra_data["berry_daily_cooldown"] = (timezone.now() + timedelta(hours=24)).isoformat()
-        await player.add_money(1500)
+        currency_settings = await CurrencySettings.aload()
+
+        # streak advances if claimed again within streak_grace_hours of the last claim, else resets to day 1
+        raw_last_claim = player.extra_data.get("daily_last_claim_at", None)
+        last_claim = datetime.fromisoformat(raw_last_claim) if raw_last_claim else None
+        if last_claim is not None and now - last_claim <= timedelta(hours=currency_settings.streak_grace_hours):
+            streak_day = player.extra_data.get("daily_streak_day", 0) % 7 + 1
+        else:
+            streak_day = 1
+        streak_bonus = getattr(currency_settings, f"day{streak_day}_reward")
+
+        role_bonus = 0
+        bonus_role = None
+        if interaction.guild_id is not None and isinstance(interaction.user, discord.Member):
+            member_role_ids = [role.id for role in interaction.user.roles]
+            if member_role_ids:
+                async for candidate in DailyBonusRole.objects.filter(
+                    server__server_id=interaction.guild_id, role_id__in=member_role_ids
+                ):
+                    if bonus_role is None or candidate.bonus_amount > bonus_role.bonus_amount:
+                        bonus_role = candidate
+            if bonus_role is not None:
+                role_bonus = bonus_role.bonus_amount
+        total = currency_settings.base_daily_amount + streak_bonus + role_bonus
+
+        cooldown_end = now + timedelta(hours=24)
+        player.extra_data["berry_daily_cooldown"] = cooldown_end.isoformat()
+        player.extra_data["daily_last_claim_at"] = now.isoformat()
+        player.extra_data["daily_streak_day"] = streak_day
+        await player.add_money(total)
         await player.asave(update_fields=("extra_data",))
 
-        await interaction.followup.send(
-            "You've claimed  "
-            f"**{format_currency(1500, False, self.bot)}**! "
-            f"Now you have **{player.money:,}**. Come back tomorrow!"
-        )
+        emoji = settings.currency_emoji(self.bot) or settings.currency_symbol or ""
+        lines = [
+            f"**{currency_settings.base_daily_amount:,}** {emoji} claimed!",
+            f"+{streak_bonus:,} bonus for streak - {streak_day}/7 days streak \N{FIRE}",
+        ]
+        if bonus_role is not None:
+            lines.append(f"+{role_bonus:,} bonus applied for being a <@&{bonus_role.role_id}> supporter")
+        lines.append(f"Come back tomorrow {format_dt(cooldown_end, 'R')}")
+
+        embed = discord.Embed(description="\n".join(lines), color=discord.Colour.gold())
+        embed.set_footer(text=f"New balance: {player.money:,}")
+        await interaction.followup.send(embed=embed)

@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.http import HttpRequest
 
-from .models import CurrencySettings, Item, ItemBall
+from .models import CurrencySettings, DailyBonusRole, DailyBonusServer, Item, ItemBall
 
 
 @admin.register(Item)
@@ -35,8 +35,40 @@ class ItemBallAdmin(admin.ModelAdmin):
 
 @admin.register(CurrencySettings)
 class CurrencySettingsAdmin(admin.ModelAdmin):
+    fieldsets = [
+        ("Spawn", {"fields": ["spawn_chance", "spawn_amount"]}),
+        (
+            "Daily streak rewards",
+            {
+                "fields": [
+                    "base_daily_amount",
+                    "day1_reward",
+                    "day2_reward",
+                    "day3_reward",
+                    "day4_reward",
+                    "day5_reward",
+                    "day6_reward",
+                    "day7_reward",
+                    "streak_grace_hours",
+                ]
+            },
+        ),
+    ]
+
     def has_add_permission(self, request: HttpRequest) -> bool:
         return super().has_add_permission(request) and CurrencySettings.objects.first() is None
 
     def has_delete_permission(self, request: HttpRequest, obj: CurrencySettings | None = None) -> bool:
         return False
+
+
+class DailyBonusRoleInline(admin.TabularInline):
+    model = DailyBonusRole
+    extra = 1
+
+
+@admin.register(DailyBonusServer)
+class DailyBonusServerAdmin(admin.ModelAdmin):
+    list_display = ("server_id",)
+    search_fields = ("server_id",)
+    inlines = [DailyBonusRoleInline]
