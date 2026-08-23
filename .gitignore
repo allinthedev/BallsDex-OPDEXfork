@@ -59,4 +59,5 @@ extra/*
 !extra/bet
 !extra/achivement
 !extra/vote_topgg
+!extra/auction_house
 .gitmodules

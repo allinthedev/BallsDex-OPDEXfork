@@ -1,0 +1,11 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auction-house"
+version = "1.0.0"
+
+description = "Adds the /hdv command group: sell treasures to the Hotel de Vente or list them for player offers, plus the Hotel's resale shop and giveaways."
+
+dependencies = []
