@@ -11,6 +11,22 @@ class CurrencySettings(models.Model):
     spawn_chance = models.FloatField(default=0.2, help_text="Value between 0 and 1, chances to spawn currency.")
     spawn_amount = models.PositiveIntegerField(default=500, help_text="The amount of currency to give from a spawn.")
 
+    base_daily_amount = models.PositiveIntegerField(
+        default=1500, help_text="Flat amount claimed by /daily every time, on top of the streak bonus."
+    )
+    day1_reward = models.PositiveIntegerField(default=100, help_text="/daily reward on streak day 1.")
+    day2_reward = models.PositiveIntegerField(default=200, help_text="/daily reward on streak day 2.")
+    day3_reward = models.PositiveIntegerField(default=300, help_text="/daily reward on streak day 3.")
+    day4_reward = models.PositiveIntegerField(default=400, help_text="/daily reward on streak day 4.")
+    day5_reward = models.PositiveIntegerField(default=500, help_text="/daily reward on streak day 5.")
+    day6_reward = models.PositiveIntegerField(default=600, help_text="/daily reward on streak day 6.")
+    day7_reward = models.PositiveIntegerField(default=1000, help_text="/daily reward on streak day 7.")
+    streak_grace_hours = models.PositiveIntegerField(
+        default=48,
+        help_text="A player must claim /daily again within this many hours of their last claim to keep "
+        "their streak going. Past this window, the streak resets to day 1.",
+    )
+
     @classmethod
     def load(cls):
         obj, _ = cls.objects.get_or_create(pk=1)
@@ -26,6 +42,40 @@ class CurrencySettings(models.Model):
 
     def __str__(self) -> str:
         return "Currency Settings"
+
+
+class DailyBonusServer(models.Model):
+    """
+    One row per Discord server. Add role/bonus pairs to it via the inline "+" on this
+    object's admin page — a server can have several roles, each with its own bonus.
+    """
+
+    server_id = models.BigIntegerField(unique=True, help_text="Discord server ID this configuration applies to.")
+
+    roles: models.QuerySet["DailyBonusRole"]
+
+    class Meta:
+        managed = True
+        db_table = "dailybonusserver"
+
+    def __str__(self) -> str:
+        return f"Daily bonus config for {self.server_id}"
+
+
+class DailyBonusRole(models.Model):
+    """A role granting a flat /daily bonus. If a player has several, the highest applies."""
+
+    server = models.ForeignKey(DailyBonusServer, on_delete=models.CASCADE, related_name="roles")
+    role_id = models.BigIntegerField(help_text="Role ID granting the flat /daily bonus.")
+    bonus_amount = models.PositiveIntegerField(default=500, help_text="Flat bonus added to every /daily claim.")
+
+    class Meta:
+        managed = True
+        db_table = "dailybonusrole"
+        unique_together = (("server", "role_id"),)
+
+    def __str__(self) -> str:
+        return f"Role {self.role_id} (+{self.bonus_amount})"
 
 
 class Item(models.Model):
