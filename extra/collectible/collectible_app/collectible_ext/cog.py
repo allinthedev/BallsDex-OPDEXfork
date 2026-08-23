@@ -62,7 +62,7 @@ class Collectible(commands.GroupCog):
         await pages.start()
 
     @app_commands.command()
-    async def claim(self, interaction: discord.Interaction["BallsDexBot"], collectible: CollectibleTransform):
+    async def buy(self, interaction: discord.Interaction["BallsDexBot"], collectible: CollectibleTransform):
         """
         Claim a collectible
 
