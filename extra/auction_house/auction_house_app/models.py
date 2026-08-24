@@ -2,7 +2,7 @@ from asgiref.sync import sync_to_async
 from django.db import models
 from django.db.models import F, Q
 
-from bd_models.models import BallInstance, Player, Special
+from bd_models.models import Ball, BallInstance, Player, Special
 
 HOTEL_PLAYER_DISCORD_ID = 0
 
@@ -59,6 +59,19 @@ class AuctionSettings(models.Model):
     )
     giveaway_activity_window_hours = models.PositiveIntegerField(
         default=24, help_text="A player must have used a bot command within this window to be eligible to win."
+    )
+
+    shop_listing_hours = models.PositiveIntegerField(
+        default=72,
+        help_text="How long a card stays in Buggy's resale shop before it expires. Unsold cards are deleted "
+        "for good when this runs out, not held back for the giveaway.",
+    )
+    excluded_balls = models.ManyToManyField(
+        Ball,
+        blank=True,
+        related_name="auction_excluded",
+        help_text="Treasures that can never be sold to Buggy or listed for auction, regardless of rarity "
+        "(e.g. utility/token balls).",
     )
 
     @classmethod
@@ -234,19 +247,34 @@ class HotelStock(models.Model):
         return f"Hotel stock #{self.pk} ({self.status})"
 
 
-class DirectSaleLog(models.Model):
+class DirectSaleRecord(models.Model):
+    """
+    One row per direct sale to Buggy. Replaces the old aggregate daily counter — the daily
+    limit is now a global (all-servers) count query against this table, and admins can click
+    into a record to see exactly what was sold, by whom, where, and for how much.
+    """
+
     player = models.ForeignKey(Player, on_delete=models.CASCADE, related_name="auction_direct_sales")
-    server_id = models.BigIntegerField()
-    sale_date = models.DateField()
-    count = models.PositiveIntegerField(default=0)
+    server_id = models.BigIntegerField(help_text="Server the /sell command was used in.")
+    instance_id = models.PositiveBigIntegerField(
+        help_text="ID of the treasure instance sold, for reference even after it moves on."
+    )
+    ball_name = models.CharField(max_length=64, help_text="Name of the treasure sold (snapshot, in case it changes).")
+    special_name = models.CharField(
+        max_length=64, blank=True, null=True, help_text="Special the treasure had, if any (snapshot)."
+    )
+    attack_bonus = models.IntegerField(default=0, help_text="Attack stat bonus at the time of sale (snapshot).")
+    health_bonus = models.IntegerField(default=0, help_text="Health stat bonus at the time of sale (snapshot).")
+    price = models.PositiveBigIntegerField(help_text="What Buggy paid for it.")
+    sold_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         managed = True
-        db_table = "auctiondirectsalelog"
-        unique_together = (("player", "server_id", "sale_date"),)
+        db_table = "auctiondirectsalerecord"
+        indexes = (models.Index(fields=("player", "sold_at")),)
 
     def __str__(self) -> str:
-        return f"{self.player} sold {self.count} on {self.sale_date} ({self.server_id})"
+        return f"{self.player} sold {self.ball_name} #{self.instance_id:0X} for {self.price} ({self.server_id})"
 
 
 class ServerActivity(models.Model):
@@ -279,6 +307,120 @@ class GiveawayLog(models.Model):
 
     def __str__(self) -> str:
         return f"Giveaway in {self.server_id} won by {self.winner} at {self.drawn_at}"
+
+
+class AuctionAdminRole(models.Model):
+    """Role(s) allowed to create Featured Auctions in a given server."""
+
+    server_id = models.BigIntegerField(help_text="Discord server ID this role applies to.")
+    role_id = models.BigIntegerField(help_text="Role ID allowed to create Featured Auctions.")
+
+    class Meta:
+        managed = True
+        db_table = "auctionadminrole"
+        unique_together = (("server_id", "role_id"),)
+        indexes = (models.Index(fields=("server_id",)),)
+
+    def __str__(self) -> str:
+        return f"Featured auction admin role {self.role_id} in {self.server_id}"
+
+
+class AuctionBidBlacklist(models.Model):
+    """A specific Discord account blocked from bidding anywhere in the auction house."""
+
+    discord_id = models.BigIntegerField(unique=True)
+    reason = models.TextField(blank=True, null=True, default=None)
+
+    class Meta:
+        managed = True
+        db_table = "auctionbidblacklist"
+
+    def __str__(self) -> str:
+        return f"Blacklisted bidder {self.discord_id}"
+
+
+class AuctionBidBlacklistRole(models.Model):
+    """A role, in a given server, blocked from bidding anywhere in the auction house."""
+
+    server_id = models.BigIntegerField(help_text="Discord server ID this role applies to.")
+    role_id = models.BigIntegerField(help_text="Role ID blocked from bidding.")
+
+    class Meta:
+        managed = True
+        db_table = "auctionbidblacklistrole"
+        unique_together = (("server_id", "role_id"),)
+        indexes = (models.Index(fields=("server_id",)),)
+
+    def __str__(self) -> str:
+        return f"Blacklisted bidder role {self.role_id} in {self.server_id}"
+
+
+class FeaturedAuction(models.Model):
+    """
+    An admin/mod-curated auction, distinct from regular player listings: bids are public
+    (bidder visible), there's no seller accept/reject step — the highest bid at expiry wins
+    automatically — and it can bundle several treasures into one auction.
+    """
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        SOLD = "sold", "Sold"
+        CANCELLED = "cancelled", "Cancelled"
+        EXPIRED_UNSOLD = "expired_unsold", "Expired unsold"
+
+    title = models.CharField(max_length=100)
+    server_id = models.BigIntegerField(help_text="Server this auction was created in.")
+    channel_id = models.BigIntegerField(help_text="Channel the live embed is posted in.")
+    message_id = models.BigIntegerField(null=True, blank=True, help_text="Message ID of the live embed.")
+    creator = models.ForeignKey(Player, on_delete=models.CASCADE, related_name="featured_auctions_created")
+    min_bid_increment = models.PositiveBigIntegerField(default=1)
+    starting_bid = models.PositiveBigIntegerField()
+    current_bid = models.PositiveBigIntegerField(null=True, blank=True)
+    current_bidder = models.ForeignKey(
+        Player, on_delete=models.SET_NULL, null=True, blank=True, related_name="featured_auctions_leading"
+    )
+    bid_count = models.PositiveIntegerField(default=0)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.ACTIVE)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+
+    items: models.QuerySet["FeaturedAuctionItem"]
+    bids: models.QuerySet["FeaturedAuctionBid"]
+
+    class Meta:
+        managed = True
+        db_table = "auctionfeatured"
+        indexes = (models.Index(fields=("status", "expires_at")),)
+
+    def __str__(self) -> str:
+        return f"Featured auction #{self.pk} — {self.title} ({self.status})"
+
+
+class FeaturedAuctionItem(models.Model):
+    auction = models.ForeignKey(FeaturedAuction, on_delete=models.CASCADE, related_name="items")
+    instance = models.OneToOneField(BallInstance, on_delete=models.CASCADE, related_name="featured_auction_item")
+
+    class Meta:
+        managed = True
+        db_table = "auctionfeatureditem"
+
+    def __str__(self) -> str:
+        return f"Item in featured auction #{self.auction_id}"
+
+
+class FeaturedAuctionBid(models.Model):
+    auction = models.ForeignKey(FeaturedAuction, on_delete=models.CASCADE, related_name="bids")
+    bidder = models.ForeignKey(Player, on_delete=models.CASCADE, related_name="featured_auction_bids")
+    amount = models.PositiveBigIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        managed = True
+        db_table = "auctionfeaturedbid"
+        indexes = (models.Index(fields=("auction", "created_at")),)
+
+    def __str__(self) -> str:
+        return f"{self.bidder} bid {self.amount} on featured auction #{self.auction_id}"
 
 
 def get_hotel_player_sync() -> Player:
