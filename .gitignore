@@ -56,7 +56,6 @@ extra/*
 !extra/collector
 !extra/battle
 !extra/merchant
-!extra/bet
 !extra/achivement
 !extra/vote_topgg
 !extra/auction_house

@@ -87,7 +87,7 @@ class Collectible(commands.GroupCog):
             if collectible.price > player.money:
                 emoji = self.bot.get_emoji(collectible.emoji_id) if collectible.emoji_id else ""
                 await interaction.followup.send(
-                    f"You don't enough {settings.currency_display_plural(self.bot)} to buy "
+                    f"You don't have enough {settings.currency_display_plural(self.bot)} to buy "
                     f"**{emoji} {collectible.name}**\n"
                     f"Your actual balance: **{format_currency(collectible.price, False, self.bot)}**"
                 )

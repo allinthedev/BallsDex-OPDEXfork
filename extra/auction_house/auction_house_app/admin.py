@@ -4,12 +4,18 @@ from bd_models.models import Special
 from django.contrib import admin
 
 from .models import (
+    AuctionAdminRole,
+    AuctionBidBlacklist,
+    AuctionBidBlacklistRole,
     AuctionBoosterRole,
     AuctionGuildConfig,
     AuctionListing,
     AuctionOffer,
     AuctionSettings,
-    DirectSaleLog,
+    DirectSaleRecord,
+    FeaturedAuction,
+    FeaturedAuctionBid,
+    FeaturedAuctionItem,
     GiveawayLog,
     HotelStock,
     ServerActivity,
@@ -24,15 +30,16 @@ if TYPE_CHECKING:
 @admin.register(AuctionSettings)
 class AuctionSettingsAdmin(admin.ModelAdmin):
     fieldsets = [
-        ("Pricing", {"fields": ["base_price", "min_price", "max_price", "excluded_rarity"]}),
+        ("Pricing", {"fields": ["base_price", "min_price", "max_price", "excluded_rarity", "excluded_balls"]}),
         (
             "Direct sales & listings",
             {"fields": ["direct_sale_daily_limit", "max_active_listings"]},
         ),
-        ("Resale shop", {"fields": ["resale_markup_percent", "max_shop_rarity"]}),
+        ("Resale shop", {"fields": ["resale_markup_percent", "max_shop_rarity", "shop_listing_hours"]}),
         ("Listing duration", {"fields": ["min_listing_hours", "max_listing_hours"]}),
         ("Giveaway", {"fields": ["giveaway_interval_hours", "giveaway_activity_window_hours"]}),
     ]
+    filter_horizontal = ("excluded_balls",)
 
     def has_add_permission(self, request: "HttpRequest") -> bool:
         return super().has_add_permission(request) and AuctionSettings.objects.first() is None
@@ -51,6 +58,26 @@ class AuctionGuildConfigAdmin(admin.ModelAdmin):
 class AuctionBoosterRoleAdmin(admin.ModelAdmin):
     list_display = ("server_id", "role_id", "buy_discount_percent", "sell_bonus_percent")
     list_editable = ("buy_discount_percent", "sell_bonus_percent")
+    list_filter = ("server_id",)
+    search_fields = ("server_id", "role_id")
+
+
+@admin.register(AuctionAdminRole)
+class AuctionAdminRoleAdmin(admin.ModelAdmin):
+    list_display = ("server_id", "role_id")
+    list_filter = ("server_id",)
+    search_fields = ("server_id", "role_id")
+
+
+@admin.register(AuctionBidBlacklist)
+class AuctionBidBlacklistAdmin(admin.ModelAdmin):
+    list_display = ("discord_id", "reason")
+    search_fields = ("discord_id",)
+
+
+@admin.register(AuctionBidBlacklistRole)
+class AuctionBidBlacklistRoleAdmin(admin.ModelAdmin):
+    list_display = ("server_id", "role_id")
     list_filter = ("server_id",)
     search_fields = ("server_id", "role_id")
 
@@ -107,11 +134,22 @@ class HotelStockAdmin(admin.ModelAdmin):
     autocomplete_fields = ("instance",)
 
 
-@admin.register(DirectSaleLog)
-class DirectSaleLogAdmin(admin.ModelAdmin):
-    list_display = ("player", "server_id", "sale_date", "count")
-    list_filter = ("server_id", "sale_date")
-    search_fields = ("player__discord_id",)
+@admin.register(DirectSaleRecord)
+class DirectSaleRecordAdmin(admin.ModelAdmin):
+    list_display = (
+        "player",
+        "server_id",
+        "sold_at",
+        "instance_id",
+        "ball_name",
+        "special_name",
+        "attack_bonus",
+        "health_bonus",
+        "price",
+    )
+    list_filter = ("server_id", "sold_at")
+    search_fields = ("player__discord_id", "ball_name", "instance_id")
+    ordering = ["-sold_at"]
 
 
 @admin.register(ServerActivity)
@@ -126,3 +164,28 @@ class GiveawayLogAdmin(admin.ModelAdmin):
     list_display = ("server_id", "winner", "instance", "drawn_at")
     list_filter = ("server_id",)
     search_fields = ("winner__discord_id",)
+
+
+class FeaturedAuctionItemInline(admin.TabularInline):
+    model = FeaturedAuctionItem
+    extra = 0
+    autocomplete_fields = ("instance",)
+
+
+class FeaturedAuctionBidInline(admin.TabularInline):
+    model = FeaturedAuctionBid
+    extra = 0
+    autocomplete_fields = ("bidder",)
+    readonly_fields = ("bidder", "amount", "created_at")
+
+    def has_add_permission(self, request: "HttpRequest", obj=None) -> bool:
+        return False
+
+
+@admin.register(FeaturedAuction)
+class FeaturedAuctionAdmin(admin.ModelAdmin):
+    list_display = ("id", "title", "server_id", "creator", "current_bid", "bid_count", "status", "expires_at")
+    list_filter = ("status", "server_id")
+    search_fields = ("title", "creator__discord_id")
+    autocomplete_fields = ("creator", "current_bidder")
+    inlines = [FeaturedAuctionItemInline, FeaturedAuctionBidInline]

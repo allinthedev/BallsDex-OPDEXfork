@@ -95,7 +95,7 @@ class ShopPages(Pages):
             if player.money < pack.prize:
                 emoji = self.bot.get_emoji(pack.emoji_id) if pack.emoji_id else ""
                 await interaction.response.send_message(
-                    f"You don't enough {settings.currency_display_plural(self.bot)} to buy "
+                    f"You don't have enough {settings.currency_display_plural(self.bot)} to buy "
                     f"**{emoji} {pack.name}**\n"
                     f"Your actual balance: {format_currency(player.money, False, self.bot)}"
                 )

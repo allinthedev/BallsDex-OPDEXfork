@@ -5,32 +5,30 @@ from typing import TYPE_CHECKING
 
 import discord
 from asgiref.sync import sync_to_async
-from auction_house_app import pricing
+from auction_house_app import pricing, services
 from auction_house_app.models import (
-    AuctionBoosterRole,
     AuctionGuildConfig,
     AuctionListing,
     AuctionOffer,
     AuctionSettings,
-    DirectSaleLog,
+    FeaturedAuction,
+    FeaturedAuctionBid,
+    FeaturedAuctionItem,
     GiveawayLog,
     HotelStock,
     ServerActivity,
-    SpecialPriceModifier,
-    StatBonusModifier,
-    get_hotel_player_sync,
 )
 from discord import app_commands
 from discord.ext import commands, tasks
 from django.db import transaction
-from django.db.models import F
+from django.db.models import F, Max
 from django.utils import timezone
 
 from ballsdex.core.utils.buttons import ConfirmChoiceView
 from ballsdex.core.utils.menus.old import FieldPageSource, Pages
-from ballsdex.core.utils.transformers import BallInstanceTransform
+from ballsdex.core.utils.transformers import BallEnabledTransform, BallInstanceTransform
 from ballsdex.core.utils.utils import can_mention
-from bd_models.models import BallInstance, Player
+from bd_models.models import BallInstance, GuildConfig, Player
 from settings.models import settings
 from settings.utils import format_currency
 
@@ -47,69 +45,101 @@ AUCTION_COLOR = discord.Colour.from_rgb(0, 132, 255)
 SORT_CHOICES = [
     app_commands.Choice(name="Rarity", value="rarity"),
     app_commands.Choice(name="Most recent", value="recent"),
-    app_commands.Choice(name="Price", value="price"),
+    app_commands.Choice(name="Price (low to high)", value="price_asc"),
+    app_commands.Choice(name="Price (high to low)", value="price_desc"),
 ]
-_LISTING_SORT_FIELDS = {"rarity": "instance__ball__rarity", "recent": "-created_at", "price": "asking_price"}
-_STOCK_SORT_FIELDS = {"rarity": "instance__ball__rarity", "recent": "-acquired_at", "price": "resale_price"}
+_LISTING_SORT_FIELDS = {
+    "rarity": "instance__ball__rarity",
+    "recent": "-created_at",
+    "price_asc": "asking_price",
+    "price_desc": "-asking_price",
+}
+_STOCK_SORT_FIELDS = {
+    "rarity": "instance__ball__rarity",
+    "recent": "-acquired_at",
+    "price_asc": "resale_price",
+    "price_desc": "-resale_price",
+}
+
+# One flavor line is picked at random for every giveaway announcement.
+GIVEAWAY_FLAVOR_LINES = [
+    (
+        "Crocodile",
+        "Congratulations, trash. Buggy just bought your silence with a shiny trinket from his little "
+        "laundering operation. Smart of you to take the deal — or maybe you're just as big a fool as he is.",
+    ),
+    (
+        "Mihawk",
+        "A treasure changes hands, and silence is purchased once again. There is no honor in it — only the "
+        "quiet arithmetic of men who fear the truth more than the blade.",
+    ),
+    (
+        "Buggy",
+        "AHAHAHA! The GREAT Captain Buggy the Star Clown has generously rewarded you with a treasure beyond "
+        "your wildest dreams! Now — you didn't see any 'accounting irregularities' at the Auction House "
+        "tonight. Understand? ...Understand?!",
+    ),
+]
 
 
 class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="auction"):
     """
-    Sell treasures to Buggy's Auction House, or list them for player bids.
+    List treasures for player bids on Buggy's Auction House, bot-wide.
     """
+
+    featured = app_commands.Group(name="featured", description="Curated multi-item auctions (mod/admin only).")
 
     def __init__(self, bot: "BallsDexBot"):
         self.bot = bot
 
     async def cog_load(self):
         self.sweep_listings.start()
+        self.sweep_shop_stock.start()
         self.giveaway_draw.start()
+        self.sweep_featured_auctions.start()
+        await self._register_persistent_featured_views()
 
     def cog_unload(self):
         self.sweep_listings.cancel()
+        self.sweep_shop_stock.cancel()
         self.giveaway_draw.cancel()
+        self.sweep_featured_auctions.cancel()
+
+    async def _register_persistent_featured_views(self):
+        await self.bot.wait_until_ready()
+        async for auction in FeaturedAuction.objects.filter(status=FeaturedAuction.Status.ACTIVE):
+            if auction.message_id is not None:
+                self.bot.add_view(views.FeaturedAuctionView(self, auction.id), message_id=auction.message_id)
 
     # -- shared helpers -----------------------------------------------------------------
-
-    async def _load_pricing_context(self) -> tuple[AuctionSettings, dict[int, int], dict[int, int]]:
-        auction_settings = await AuctionSettings.aload()
-        special_modifiers = {sm.special_id: sm.percent async for sm in SpecialPriceModifier.objects.all()}
-        stat_modifiers = {sm.value: sm.percent async for sm in StatBonusModifier.objects.all()}
-        return auction_settings, special_modifiers, stat_modifiers
 
     async def _get_guild_config(self, server_id: int) -> AuctionGuildConfig | None:
         return await AuctionGuildConfig.objects.filter(server_id=server_id).afirst()
 
-    async def _get_booster_role(
-        self, user: discord.User | discord.Member, server_id: int, field: str
-    ) -> AuctionBoosterRole | None:
-        """
-        Best applicable booster role for `user` in `server_id`, ranked by `field`
-        (`"buy_discount_percent"` or `"sell_bonus_percent"`) — highest wins if several apply.
-        """
-        if not isinstance(user, discord.Member):
+    async def _resolve_announcement_channel(
+        self, server_id: int, *, fallback_to_spawn: bool = False
+    ) -> discord.TextChannel | discord.Thread | None:
+        guild_config = await self._get_guild_config(server_id)
+        channel_id = guild_config.notification_channel_id if guild_config else None
+        if channel_id is None and fallback_to_spawn:
+            core_config = await GuildConfig.objects.filter(guild_id=server_id).afirst()
+            channel_id = core_config.spawn_channel if core_config else None
+        if channel_id is None:
             return None
-        role_ids = [role.id for role in user.roles]
-        if not role_ids:
-            return None
-        best: AuctionBoosterRole | None = None
-        async for booster in AuctionBoosterRole.objects.filter(server_id=server_id, role_id__in=role_ids):
-            if best is None or getattr(booster, field) > getattr(best, field):
-                best = booster
-        return best
-
-    async def notify_sale(self, listing: AuctionListing, offer: AuctionOffer):
-        """Tag the buyer in the server's configured notification channel, if any."""
-        guild_config = await self._get_guild_config(listing.server_id)
-        if guild_config is None or guild_config.notification_channel_id is None:
-            return
-        channel = self.bot.get_channel(guild_config.notification_channel_id)
+        channel = self.bot.get_channel(channel_id)
         if channel is None:
             try:
-                channel = await self.bot.fetch_channel(guild_config.notification_channel_id)
+                channel = await self.bot.fetch_channel(channel_id)
             except discord.HTTPException:
-                return
+                return None
         if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            return None
+        return channel
+
+    async def notify_sale(self, listing: AuctionListing, offer: AuctionOffer):
+        """Tag the buyer in the origin server's configured notification channel, if any."""
+        channel = await self._resolve_announcement_channel(listing.server_id)
+        if channel is None:
             return
         try:
             await channel.send(
@@ -121,6 +151,27 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
         except discord.HTTPException:
             log.warning("Failed to send auction sale notification in channel %s", channel.id)
 
+    async def notify_giveaway_win(self, winner: Player, instance: BallInstance, home_server_id: int | None):
+        if home_server_id is None:
+            return
+        channel = await self._resolve_announcement_channel(home_server_id, fallback_to_spawn=True)
+        if channel is None:
+            return
+        speaker, line = random.choice(GIVEAWAY_FLAVOR_LINES)
+        embed = discord.Embed(
+            title="🎪🤡 Buggy's Giveaway!",
+            description=(
+                f"<@{winner.discord_id}> just won "
+                f"{instance.description(include_emoji=True, bot=self.bot)} from Buggy's unsold stock!\n\n"
+                f"*\"{line}\"*\n— **{speaker}**"
+            ),
+            color=AUCTION_COLOR,
+        )
+        try:
+            await channel.send(embed=embed, allowed_mentions=await can_mention([winner]))
+        except discord.HTTPException:
+            log.warning("Failed to send giveaway announcement in channel %s", channel.id)
+
     # -- /auction setchannel ------------------------------------------------------------------------
 
     @app_commands.command(name="setchannel")
@@ -131,7 +182,7 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
         self, interaction: discord.Interaction["BallsDexBot"], channel: discord.TextChannel | None = None
     ):
         """
-        Set the channel where Buggy's Auction House posts sale notifications.
+        Set the channel where Buggy's Auction House posts sale notifications for this server.
 
         Parameters
         ----------
@@ -154,97 +205,6 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
         await interaction.response.send_message(
             f"Sale notifications will now be posted in {channel.mention}.", ephemeral=True
         )
-
-    # -- /auction sell ------------------------------------------------------------------------
-
-    @app_commands.command(name="sell")
-    async def sell(self, interaction: discord.Interaction["BallsDexBot"], countryball: BallInstanceTransform):
-        """
-        Sell a treasure directly to Buggy's Auction House for an instant payout.
-
-        Parameters
-        ----------
-        countryball: BallInstance
-            The treasure you want to sell.
-        """
-        if not countryball:
-            return
-        await interaction.response.defer(thinking=True, ephemeral=True)
-
-        if not countryball.is_tradeable or countryball.deleted:
-            await interaction.followup.send(f"This {settings.collectible_name} can't be sold.")
-            return
-        if countryball.special_id is not None:
-            await interaction.followup.send(
-                "Special treasures can't be sold directly to Buggy — list them for auction instead with "
-                "`/auction create`."
-            )
-            return
-
-        auction_settings, _, stat_modifiers = await self._load_pricing_context()
-        if countryball.countryball.rarity == auction_settings.excluded_rarity:
-            await interaction.followup.send("This treasure's rarity can't be sold to Buggy.")
-            return
-        if await self._is_already_committed(countryball):
-            await interaction.followup.send("This treasure is already listed or already belongs to Buggy.")
-            return
-
-        server_id = interaction.guild_id
-        assert server_id is not None
-        today = timezone.localdate()
-        sale_log, _ = await DirectSaleLog.objects.aget_or_create(
-            player_id=countryball.player_id, server_id=server_id, sale_date=today
-        )
-        if sale_log.count >= auction_settings.direct_sale_daily_limit:
-            await interaction.followup.send(
-                f"You've reached the daily limit of {auction_settings.direct_sale_daily_limit} direct sales "
-                "to Buggy. Try again tomorrow."
-            )
-            return
-
-        booster = await self._get_booster_role(interaction.user, server_id, "sell_bonus_percent")
-        bonus_percent = booster.sell_bonus_percent if booster else 0
-        price = pricing.direct_sale_price(countryball, auction_settings, stat_modifiers, bonus_percent)
-
-        embed = discord.Embed(
-            title="Sell to Buggy's Auction House",
-            description=(
-                f"{countryball.description(include_emoji=True, bot=self.bot)}\n\n"
-                f"Buggy offers you **{format_currency(price, False, self.bot)}** for this "
-                f"{settings.collectible_name}{' (booster bonus included)' if bonus_percent else ''}.\n\n"
-                "This is final — the treasure leaves your inventory immediately."
-            ),
-            color=AUCTION_COLOR,
-        )
-        view = ConfirmChoiceView(interaction, accept_message="Sold!", cancel_message="Sale cancelled.")
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-        await view.wait()
-        if not view.value:
-            return
-
-        resale_price = max(price, round(price * (1 + auction_settings.resale_markup_percent / 100)))
-        await sync_to_async(self._settle_direct_sale)(countryball.pk, price, resale_price, server_id)
-        await interaction.followup.send(f"Sold for **{format_currency(price, False, self.bot)}**!", ephemeral=True)
-
-    def _settle_direct_sale(self, instance_id: int, price: int, resale_price: int, server_id: int):
-        with transaction.atomic():
-            instance = BallInstance.objects.select_related("player").select_for_update().get(pk=instance_id)
-            player = instance.player
-            player.money = F("money") + price
-            player.save(update_fields=["money"])
-
-            hotel = get_hotel_player_sync()
-            instance.player = hotel
-            instance.favorite = False
-            instance.save(update_fields=["player", "favorite"])
-
-            HotelStock.objects.create(
-                instance=instance, server_id=server_id, buyout_price=price, resale_price=resale_price
-            )
-            today = timezone.localdate()
-            DirectSaleLog.objects.filter(
-                player_id=player.pk, server_id=server_id, sale_date=today
-            ).update(count=F("count") + 1)
 
     # -- /auction create ------------------------------------------------------------------------
 
@@ -277,9 +237,12 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
             await interaction.followup.send(f"This {settings.collectible_name} can't be listed.")
             return
 
-        auction_settings, special_modifiers, stat_modifiers = await self._load_pricing_context()
+        auction_settings, special_modifiers, stat_modifiers = await services.load_pricing_context()
         if countryball.countryball.rarity == auction_settings.excluded_rarity:
             await interaction.followup.send("This treasure's rarity can't be listed for auction.")
+            return
+        if await services.is_excluded_ball(countryball.ball_id, auction_settings):
+            await interaction.followup.send("This treasure can't be listed for auction.")
             return
         if not (auction_settings.min_listing_hours <= hours <= auction_settings.max_listing_hours):
             await interaction.followup.send(
@@ -290,7 +253,7 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
         if await countryball.is_locked():
             await interaction.followup.send(f"This {settings.collectible_name} is currently locked.")
             return
-        if await self._is_already_committed(countryball):
+        if await services.is_already_committed(countryball):
             await interaction.followup.send("This treasure is already listed or already belongs to Buggy.")
             return
 
@@ -298,8 +261,15 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
             seller=countryball.player, status=AuctionListing.Status.ACTIVE
         ).acount()
         if active_count >= auction_settings.max_active_listings:
+            soonest = (
+                await AuctionListing.objects.filter(seller=countryball.player, status=AuctionListing.Status.ACTIVE)
+                .order_by("expires_at")
+                .afirst()
+            )
+            hint = f" A slot frees up {discord.utils.format_dt(soonest.expires_at, 'R')}." if soonest else ""
             await interaction.followup.send(
-                f"You can only have {auction_settings.max_active_listings} active listings at once."
+                f"You can only have {auction_settings.max_active_listings} active listings at once.{hint} "
+                "You can also free one up early with `/auction cancel`."
             )
             return
 
@@ -314,8 +284,8 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
                 f"**Recommended price:** {format_currency(recommended, False, self.bot)}\n"
                 f"**Your asking price:** {format_currency(price, False, self.bot)}\n"
                 f"**Duration:** {hours}h\n\n"
-                "Buyers will bid on this listing. You'll only see the highest bid, and can accept or reject "
-                "it with `/auction mylistings` — you won't know who placed it unless you accept."
+                "Buyers anywhere can bid on this listing. You'll only see the highest bid, and can accept or "
+                "reject it with `/auction mylistings` — you won't know who placed it unless you accept."
             ),
             color=AUCTION_COLOR,
         )
@@ -325,7 +295,11 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
         if not view.value:
             return
 
-        await sync_to_async(self._create_listing)(countryball.pk, price, hours, server_id)
+        try:
+            await services.safe_settle(self._create_listing, countryball.pk, price, hours, server_id)
+        except RuntimeError as error:
+            await interaction.followup.send(str(error), ephemeral=True)
+            return
         await interaction.followup.send("Your treasure has been listed on Buggy's Auction House!", ephemeral=True)
 
     def _create_listing(self, instance_id: int, price: int, hours: int, server_id: int):
@@ -342,55 +316,125 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
                 expires_at=timezone.now() + timedelta(hours=hours),
             )
 
-    async def _is_already_committed(self, instance: BallInstance) -> bool:
-        listed = await AuctionListing.objects.filter(
-            instance=instance, status=AuctionListing.Status.ACTIVE
-        ).aexists()
-        if listed:
-            return True
-        return await HotelStock.objects.filter(instance=instance).aexists()
+    # -- /auction cancel ------------------------------------------------------------------------
+
+    @app_commands.command(name="cancel")
+    @app_commands.rename(listing_id="listing")
+    async def cancel_listing(self, interaction: discord.Interaction["BallsDexBot"], listing_id: int):
+        """
+        Withdraw one of your own active listings early. Pending bids are refunded.
+
+        Parameters
+        ----------
+        listing_id: int
+            The listing you want to withdraw.
+        """
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        seller, _ = await Player.objects.aget_or_create(discord_id=interaction.user.id)
+        try:
+            listing = await services.safe_settle(self._cancel_listing, listing_id, seller.pk)
+        except RuntimeError as error:
+            await interaction.followup.send(str(error))
+            return
+        await interaction.followup.send(
+            f"Listing #{listing.id} cancelled — your treasure is back in your inventory.", ephemeral=True
+        )
+
+    def _cancel_listing(self, listing_id: int, seller_id: int) -> AuctionListing:
+        with transaction.atomic():
+            try:
+                listing = AuctionListing.objects.select_related("instance").select_for_update().get(pk=listing_id)
+            except AuctionListing.DoesNotExist:
+                raise RuntimeError("This listing doesn't exist.")
+            if listing.seller_id != seller_id:
+                raise RuntimeError("This isn't your listing.")
+            if listing.status != AuctionListing.Status.ACTIVE:
+                raise RuntimeError("This listing is no longer active.")
+
+            listing.status = AuctionListing.Status.CANCELLED
+            listing.save(update_fields=["status"])
+            listing.instance.locked = None
+            listing.instance.save(update_fields=["locked"])
+
+            pending = AuctionOffer.objects.filter(
+                listing=listing, status=AuctionOffer.Status.PENDING
+            ).select_related("buyer")
+            for offer in pending:
+                buyer = offer.buyer
+                buyer.money = F("money") + offer.amount
+                buyer.save(update_fields=["money"])
+                offer.status = AuctionOffer.Status.REFUNDED
+                offer.save(update_fields=["status"])
+            return listing
+
+    @cancel_listing.autocomplete("listing_id")
+    async def cancel_listing_autocomplete(
+        self, interaction: discord.Interaction["BallsDexBot"], current: str
+    ) -> list[app_commands.Choice[int]]:
+        qs = (
+            AuctionListing.objects.filter(seller__discord_id=interaction.user.id, status=AuctionListing.Status.ACTIVE)
+            .select_related("instance")
+            .order_by("expires_at")[:25]
+        )
+        return [
+            app_commands.Choice(name=f"#{listing.id} {listing.instance.short_description()}", value=listing.id)
+            async for listing in qs
+        ]
 
     # -- /auction browse ------------------------------------------------------------------------
 
     @app_commands.command(name="browse")
-    @app_commands.describe(name="Only show listings whose treasure name contains this", sort="How to order the results")
+    @app_commands.describe(treasure="Only show listings for this treasure", sort="How to order the results")
     @app_commands.choices(sort=SORT_CHOICES)
     async def browse(
         self,
         interaction: discord.Interaction["BallsDexBot"],
-        name: str | None = None,
+        treasure: BallEnabledTransform | None = None,
         sort: app_commands.Choice[str] | None = None,
     ):
         """
-        Browse treasures currently listed on Buggy's Auction House on this server.
+        Browse treasures currently listed on Buggy's Auction House.
 
         Parameters
         ----------
-        name: str
-            Only show listings whose treasure name contains this.
+        treasure: Ball
+            Only show listings for this treasure.
         sort: str
             How to order the results.
         """
         await interaction.response.defer(thinking=True)
-        server_id = interaction.guild_id
-        qs = AuctionListing.objects.filter(
-            server_id=server_id, status=AuctionListing.Status.ACTIVE
-        ).select_related("instance", "instance__ball", "instance__special")
-        if name:
-            qs = qs.filter(instance__ball__country__icontains=name)
+        qs = AuctionListing.objects.filter(status=AuctionListing.Status.ACTIVE).select_related(
+            "instance", "instance__ball", "instance__special"
+        )
+        if treasure is not None:
+            qs = qs.filter(instance__ball=treasure)
         order = _LISTING_SORT_FIELDS.get(sort.value if sort else "", "expires_at")
         listings = [listing async for listing in qs.order_by(order)]
         if not listings:
             await interaction.followup.send(
-                "No listings match that name." if name else "No treasures are currently listed on this server's auction house."
+                "No listings match that treasure." if treasure else "No treasures are currently listed on Buggy's Auction House."
             )
             return
+
+        top_bids = {
+            row["listing_id"]: row["top"]
+            async for row in AuctionOffer.objects.filter(
+                listing_id__in=[listing.id for listing in listings], status=AuctionOffer.Status.PENDING
+            )
+            .values("listing_id")
+            .annotate(top=Max("amount"))
+        }
 
         entries = [
             (
                 f"#{listing.id} — {listing.instance.description(include_emoji=True, bot=self.bot)}",
                 f"Asking: {format_currency(listing.asking_price, False, self.bot)} • "
-                f"Expires {discord.utils.format_dt(listing.expires_at, 'R')}",
+                + (
+                    f"Highest bid: {format_currency(top_bids[listing.id], False, self.bot)} • "
+                    if listing.id in top_bids
+                    else "No bids yet • "
+                )
+                + f"Expires {discord.utils.format_dt(listing.expires_at, 'R')}",
             )
             for listing in listings
         ]
@@ -421,12 +465,15 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
             How much you're bidding.
         """
         await interaction.response.defer(thinking=True, ephemeral=True)
+        if interaction.guild_id is not None and await services.is_blacklisted_bidder(
+            interaction.user, interaction.guild_id
+        ):
+            await interaction.followup.send("You're not allowed to bid on the auction house.")
+            return
         try:
-            listing = await AuctionListing.objects.select_related("instance", "seller").aget(
-                pk=listing_id, server_id=interaction.guild_id
-            )
+            listing = await AuctionListing.objects.select_related("instance", "seller").aget(pk=listing_id)
         except AuctionListing.DoesNotExist:
-            await interaction.followup.send("This listing doesn't exist on this server.")
+            await interaction.followup.send("This listing doesn't exist.")
             return
         if listing.status != AuctionListing.Status.ACTIVE:
             await interaction.followup.send("This listing is no longer active.")
@@ -454,7 +501,7 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
             return
 
         try:
-            await sync_to_async(self._create_offer)(listing.pk, buyer.pk, amount)
+            await services.safe_settle(self._create_offer, listing.pk, buyer.pk, amount)
         except RuntimeError as error:
             await interaction.followup.send(str(error))
             return
@@ -482,7 +529,7 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
         self, interaction: discord.Interaction["BallsDexBot"], current: str
     ) -> list[app_commands.Choice[int]]:
         qs = (
-            AuctionListing.objects.filter(server_id=interaction.guild_id, status=AuctionListing.Status.ACTIVE)
+            AuctionListing.objects.filter(status=AuctionListing.Status.ACTIVE)
             .select_related("instance")
             .order_by("expires_at")[:25]
         )
@@ -500,7 +547,7 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
     @app_commands.command(name="mybids")
     async def my_bids(self, interaction: discord.Interaction["BallsDexBot"]):
         """
-        See your pending bids and cancel any of them.
+        Browse your pending bids one at a time — see if you've been outbid, add to a bid, or cancel it.
         """
         await interaction.response.defer(thinking=True, ephemeral=True)
         buyer, _ = await Player.objects.aget_or_create(discord_id=interaction.user.id)
@@ -508,24 +555,28 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
             offer
             async for offer in AuctionOffer.objects.filter(buyer=buyer, status=AuctionOffer.Status.PENDING)
             .select_related("listing", "listing__instance")
-            .order_by("-created_at")[:25]
+            .order_by("-created_at")
         ]
         if not offers:
             await interaction.followup.send("You don't have any pending bids.")
             return
 
-        embed = discord.Embed(title="Your pending bids", color=AUCTION_COLOR)
-        for offer in offers:
-            embed.add_field(
-                name=f"Bid #{offer.id} — {format_currency(offer.amount, False, self.bot)}",
-                value=f"Listing #{offer.listing_id}: {offer.listing.instance.short_description()}",
-                inline=False,
-            )
-        view = views.CancelOfferView(interaction, offers, self)
+        view = views.MyBidsView(interaction, offers, self)
+        embed = await view.build_embed()
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
+    async def top_pending_bid(self, listing_id: int, exclude_offer_id: int) -> int | None:
+        """Highest pending bid on a listing other than `exclude_offer_id`, or None if there isn't one."""
+        top = await (
+            AuctionOffer.objects.filter(listing_id=listing_id, status=AuctionOffer.Status.PENDING)
+            .exclude(pk=exclude_offer_id)
+            .order_by("-amount", "created_at")
+            .afirst()
+        )
+        return top.amount if top else None
+
     async def cancel_offer(self, offer_id: int, buyer_discord_id: int) -> AuctionOffer:
-        return await sync_to_async(self._cancel_offer)(offer_id, buyer_discord_id)
+        return await services.safe_settle(self._cancel_offer, offer_id, buyer_discord_id)
 
     def _cancel_offer(self, offer_id: int, buyer_discord_id: int) -> AuctionOffer:
         with transaction.atomic():
@@ -543,6 +594,44 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
             buyer.save(update_fields=["money"])
             offer.status = AuctionOffer.Status.CANCELLED
             offer.save(update_fields=["status"])
+            return offer
+
+    async def increase_offer(self, offer_id: int, buyer_discord_id: int, additional: int) -> AuctionOffer:
+        return await services.safe_settle(self._increase_offer, offer_id, buyer_discord_id, additional)
+
+    def _increase_offer(self, offer_id: int, buyer_discord_id: int, additional: int) -> AuctionOffer:
+        with transaction.atomic():
+            try:
+                offer = (
+                    AuctionOffer.objects.select_related("buyer", "listing", "listing__instance")
+                    .select_for_update()
+                    .get(pk=offer_id)
+                )
+            except AuctionOffer.DoesNotExist:
+                raise RuntimeError("This bid no longer exists.")
+            if offer.buyer.discord_id != buyer_discord_id:
+                raise RuntimeError("This isn't your bid.")
+            if offer.status != AuctionOffer.Status.PENDING:
+                raise RuntimeError("This bid is no longer pending.")
+            if offer.listing.status != AuctionListing.Status.ACTIVE:
+                raise RuntimeError("This listing is no longer active.")
+
+            buyer = offer.buyer
+            buyer.refresh_from_db(fields=["money"])
+            if buyer.money < additional:
+                raise RuntimeError(
+                    f"You don't have enough coins to add that much (balance: "
+                    f"{format_currency(buyer.money, False)})."
+                )
+            buyer.money = F("money") - additional
+            buyer.save(update_fields=["money"])
+            offer.amount = F("amount") + additional
+            offer.save(update_fields=["amount"])
+            # refresh only `amount` (not a full refresh_from_db): that keeps the already
+            # select_related-cached `buyer`/`listing` around instead of clearing them, which
+            # would otherwise force an unsafe sync DB fetch the next time this offer's
+            # `.listing` is read from async code (e.g. MyBidsView.build_embed)
+            offer.refresh_from_db(fields=["amount"])
             return offer
 
     # -- /auction mylistings ------------------------------------------------------------------------
@@ -598,7 +687,7 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     async def accept_offer(self, offer_id: int, seller_discord_id: int) -> tuple[AuctionListing, AuctionOffer]:
-        return await sync_to_async(self._accept_offer)(offer_id, seller_discord_id)
+        return await services.safe_settle(self._accept_offer, offer_id, seller_discord_id)
 
     def _accept_offer(self, offer_id: int, seller_discord_id: int) -> tuple[AuctionListing, AuctionOffer]:
         with transaction.atomic():
@@ -643,7 +732,7 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
             return listing, offer
 
     async def reject_offer(self, offer_id: int, seller_discord_id: int) -> AuctionOffer:
-        return await sync_to_async(self._reject_offer)(offer_id, seller_discord_id)
+        return await services.safe_settle(self._reject_offer, offer_id, seller_discord_id)
 
     def _reject_offer(self, offer_id: int, seller_discord_id: int) -> AuctionOffer:
         with transaction.atomic():
@@ -668,50 +757,55 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
     # -- /auction shop & /auction buy ------------------------------------------------------------------------
 
     @app_commands.command(name="shop")
-    @app_commands.describe(name="Only show items whose treasure name contains this", sort="How to order the results")
+    @app_commands.describe(treasure="Only show this treasure", sort="How to order the results")
     @app_commands.choices(sort=SORT_CHOICES)
     async def shop(
         self,
         interaction: discord.Interaction["BallsDexBot"],
-        name: str | None = None,
+        treasure: BallEnabledTransform | None = None,
         sort: app_commands.Choice[str] | None = None,
     ):
         """
-        Browse Buggy's Auction House resale shop on this server.
+        Browse Buggy's Auction House resale shop.
 
         Parameters
         ----------
-        name: str
-            Only show items whose treasure name contains this.
+        treasure: Ball
+            Only show this treasure.
         sort: str
             How to order the results.
         """
         await interaction.response.defer(thinking=True)
-        server_id = interaction.guild_id
         auction_settings = await AuctionSettings.aload()
-        qs = HotelStock.objects.filter(server_id=server_id, status=HotelStock.Status.AVAILABLE).select_related(
+        qs = HotelStock.objects.filter(status=HotelStock.Status.AVAILABLE).select_related(
             "instance", "instance__ball"
         )
         if auction_settings.max_shop_rarity is not None:
             qs = qs.filter(instance__ball__rarity__lte=auction_settings.max_shop_rarity)
-        if name:
-            qs = qs.filter(instance__ball__country__icontains=name)
+        cutoff = timezone.now() - timedelta(hours=auction_settings.shop_listing_hours)
+        qs = qs.filter(acquired_at__gte=cutoff)
+        if treasure is not None:
+            qs = qs.filter(instance__ball=treasure)
         order = _STOCK_SORT_FIELDS.get(sort.value if sort else "", "resale_price")
         stock = [item async for item in qs.order_by(order)]
         if not stock:
             await interaction.followup.send(
-                "No items match that name." if name else "Buggy doesn't have anything for sale on this server right now."
+                "No items match that treasure." if treasure else "Buggy doesn't have anything for sale right now."
             )
             return
 
-        booster = await self._get_booster_role(interaction.user, server_id, "buy_discount_percent")
-        discount_percent = booster.buy_discount_percent if booster else 0
+        server_id = interaction.guild_id
+        discount_percent = (
+            await services.get_total_booster_bonus(interaction.user, server_id, "buy_discount_percent")
+            if server_id is not None
+            else 0
+        )
 
         entries = []
         for item in stock:
             price = item.resale_price
             if discount_percent:
-                price = round(price * (1 - discount_percent / 100))
+                price = round(price * (1 - min(discount_percent, 100) / 100))
             entries.append(
                 (
                     f"#{item.id} — {item.instance.description(include_emoji=True, bot=self.bot)}",
@@ -736,13 +830,10 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
             The item you want to buy.
         """
         await interaction.response.defer(thinking=True, ephemeral=True)
-        server_id = interaction.guild_id
         try:
-            stock = await HotelStock.objects.select_related("instance", "instance__ball").aget(
-                pk=stock_id, server_id=server_id
-            )
+            stock = await HotelStock.objects.select_related("instance", "instance__ball").aget(pk=stock_id)
         except HotelStock.DoesNotExist:
-            await interaction.followup.send("This item doesn't exist in this server's shop.")
+            await interaction.followup.send("This item doesn't exist.")
             return
         if stock.status != HotelStock.Status.AVAILABLE:
             await interaction.followup.send("This item has already been sold.")
@@ -757,10 +848,15 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
             return
 
         buyer, _ = await Player.objects.aget_or_create(discord_id=interaction.user.id)
-        booster = await self._get_booster_role(interaction.user, server_id, "buy_discount_percent")
+        server_id = interaction.guild_id
+        discount_percent = (
+            await services.get_total_booster_bonus(interaction.user, server_id, "buy_discount_percent")
+            if server_id is not None
+            else 0
+        )
         price = stock.resale_price
-        if booster:
-            price = round(price * (1 - booster.buy_discount_percent / 100))
+        if discount_percent:
+            price = round(price * (1 - min(discount_percent, 100) / 100))
         if not buyer.can_afford(price):
             await interaction.followup.send(
                 f"You don't have enough {settings.currency_display_plural(self.bot)} for this item.\n"
@@ -770,7 +866,7 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
             return
 
         try:
-            await sync_to_async(self._settle_shop_purchase)(stock.pk, buyer.pk, price)
+            await services.safe_settle(self._settle_shop_purchase, stock.pk, buyer.pk, price)
         except RuntimeError as error:
             await interaction.followup.send(str(error))
             return
@@ -800,10 +896,11 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
         self, interaction: discord.Interaction["BallsDexBot"], current: str
     ) -> list[app_commands.Choice[int]]:
         auction_settings = await AuctionSettings.aload()
-        qs = HotelStock.objects.filter(server_id=interaction.guild_id, status=HotelStock.Status.AVAILABLE)
+        qs = HotelStock.objects.filter(status=HotelStock.Status.AVAILABLE)
         if auction_settings.max_shop_rarity is not None:
             qs = qs.filter(instance__ball__rarity__lte=auction_settings.max_shop_rarity)
-        qs = qs.select_related("instance").order_by("resale_price")[:25]
+        cutoff = timezone.now() - timedelta(hours=auction_settings.shop_listing_hours)
+        qs = qs.filter(acquired_at__gte=cutoff).select_related("instance").order_by("resale_price")[:25]
         return [
             app_commands.Choice(
                 name=f"#{item.id} {item.instance.short_description()} — {format_currency(item.resale_price)}",
@@ -811,6 +908,397 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
             )
             async for item in qs
         ]
+
+    # -- /auction featured --------------------------------------------------------------------------
+
+    @featured.command(name="create")
+    @app_commands.describe(
+        title="Name of the auction",
+        starting_bid="Minimum starting bid",
+        duration_hours="How long the auction runs, in hours",
+        channel="Channel to post the live embed in",
+        min_bid_increment="Minimum amount each new bid must exceed the last by (default 1)",
+    )
+    @app_commands.guild_only()
+    async def featured_create(
+        self,
+        interaction: discord.Interaction["BallsDexBot"],
+        title: app_commands.Range[str, 1, 100],
+        starting_bid: app_commands.Range[int, 1],
+        duration_hours: app_commands.Range[int, 1, 168],
+        channel: discord.TextChannel,
+        min_bid_increment: app_commands.Range[int, 1] = 1,
+    ):
+        """
+        Start a Featured Auction (mod/admin only) — add items to it with /auction featured additem.
+        """
+        server_id = interaction.guild_id
+        assert server_id is not None
+        if not await services.is_auction_admin(interaction.user, server_id):
+            await interaction.response.send_message(
+                "You don't have permission to create Featured Auctions here.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        creator, _ = await Player.objects.aget_or_create(discord_id=interaction.user.id)
+        auction = await FeaturedAuction.objects.acreate(
+            title=title,
+            server_id=server_id,
+            channel_id=channel.id,
+            creator=creator,
+            min_bid_increment=min_bid_increment,
+            starting_bid=starting_bid,
+            expires_at=timezone.now() + timedelta(hours=duration_hours),
+        )
+        embed = await self._build_featured_embed(auction)
+        view = views.FeaturedAuctionView(self, auction.id)
+        message = await channel.send(embed=embed, view=view)
+        auction.message_id = message.id
+        await auction.asave(update_fields=("message_id",))
+        await interaction.followup.send(
+            f"Featured auction #{auction.id} created in {channel.mention}. Add items with "
+            f"`/auction featured additem auction:{auction.id}`.",
+            ephemeral=True,
+        )
+
+    @featured.command(name="additem")
+    @app_commands.rename(auction_id="auction")
+    @app_commands.guild_only()
+    async def featured_additem(
+        self, interaction: discord.Interaction["BallsDexBot"], auction_id: int, countryball: BallInstanceTransform
+    ):
+        """
+        Add a treasure you own to one of your draft/active Featured Auctions.
+        """
+        if not countryball:
+            return
+        server_id = interaction.guild_id
+        assert server_id is not None
+        if not await services.is_auction_admin(interaction.user, server_id):
+            await interaction.response.send_message(
+                "You don't have permission to manage Featured Auctions here.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        try:
+            auction = await FeaturedAuction.objects.aget(pk=auction_id, status=FeaturedAuction.Status.ACTIVE)
+        except FeaturedAuction.DoesNotExist:
+            await interaction.followup.send("This featured auction doesn't exist or has already closed.")
+            return
+        if auction.creator_id != countryball.player_id:
+            await interaction.followup.send("You can only add treasures you own yourself.")
+            return
+        if not countryball.is_tradeable or countryball.deleted:
+            await interaction.followup.send(f"This {settings.collectible_name} can't be added.")
+            return
+        if await countryball.is_locked() or await services.is_already_committed(countryball):
+            await interaction.followup.send("This treasure is locked or already committed elsewhere.")
+            return
+        if await FeaturedAuctionItem.objects.filter(instance=countryball).aexists():
+            await interaction.followup.send("This treasure is already part of a featured auction.")
+            return
+
+        try:
+            await services.safe_settle(self._add_featured_item, auction_id, countryball.pk)
+        except RuntimeError as error:
+            await interaction.followup.send(str(error), ephemeral=True)
+            return
+        await self._refresh_featured_embed(auction_id)
+        await interaction.followup.send(f"Added to featured auction #{auction_id}.", ephemeral=True)
+
+    def _add_featured_item(self, auction_id: int, instance_id: int):
+        with transaction.atomic():
+            instance = BallInstance.objects.select_for_update().get(pk=instance_id)
+            instance.locked = timezone.now()
+            instance.save(update_fields=["locked"])
+            FeaturedAuctionItem.objects.create(auction_id=auction_id, instance=instance)
+
+    @featured_additem.autocomplete("auction_id")
+    async def featured_additem_autocomplete(
+        self, interaction: discord.Interaction["BallsDexBot"], current: str
+    ) -> list[app_commands.Choice[int]]:
+        qs = FeaturedAuction.objects.filter(
+            server_id=interaction.guild_id,
+            status=FeaturedAuction.Status.ACTIVE,
+            creator__discord_id=interaction.user.id,
+        ).order_by("-created_at")[:25]
+        return [app_commands.Choice(name=f"#{auction.id} {auction.title}", value=auction.id) async for auction in qs]
+
+    @featured.command(name="cancel")
+    @app_commands.rename(auction_id="auction")
+    @app_commands.guild_only()
+    async def featured_cancel(self, interaction: discord.Interaction["BallsDexBot"], auction_id: int):
+        """
+        Cancel one of your Featured Auctions early. Items and the current bid are refunded.
+        """
+        server_id = interaction.guild_id
+        assert server_id is not None
+        if not await services.is_auction_admin(interaction.user, server_id):
+            await interaction.response.send_message(
+                "You don't have permission to manage Featured Auctions here.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        try:
+            auction = await services.safe_settle(
+                self._close_featured_auction, auction_id, FeaturedAuction.Status.CANCELLED
+            )
+        except RuntimeError as error:
+            await interaction.followup.send(str(error))
+            return
+        await self._render_featured_close(auction)
+        await interaction.followup.send(f"Featured auction #{auction_id} cancelled.", ephemeral=True)
+
+    @featured_cancel.autocomplete("auction_id")
+    async def featured_cancel_autocomplete(
+        self, interaction: discord.Interaction["BallsDexBot"], current: str
+    ) -> list[app_commands.Choice[int]]:
+        qs = FeaturedAuction.objects.filter(
+            server_id=interaction.guild_id, status=FeaturedAuction.Status.ACTIVE
+        ).order_by("-created_at")[:25]
+        return [app_commands.Choice(name=f"#{auction.id} {auction.title}", value=auction.id) async for auction in qs]
+
+    # -- buttons on the live embed (creator-only) ------------------------------------------
+
+    async def accept_featured_now(self, auction_id: int, requester_discord_id: int) -> FeaturedAuction:
+        return await services.safe_settle(self._accept_featured_now, auction_id, requester_discord_id)
+
+    def _accept_featured_now(self, auction_id: int, requester_discord_id: int) -> FeaturedAuction:
+        with transaction.atomic():
+            try:
+                auction = (
+                    FeaturedAuction.objects.select_related("creator")
+                    .select_for_update()
+                    .get(pk=auction_id, status=FeaturedAuction.Status.ACTIVE)
+                )
+            except FeaturedAuction.DoesNotExist:
+                raise RuntimeError("This featured auction doesn't exist or has already closed.")
+            if auction.creator.discord_id != requester_discord_id:
+                raise RuntimeError("Only the creator can accept early.")
+            if auction.current_bidder_id is None:
+                raise RuntimeError("There are no bids yet.")
+            self._settle_featured_close(auction, FeaturedAuction.Status.SOLD, award_to_bidder=True)
+            return auction
+
+    async def cancel_featured_now(self, auction_id: int, requester_discord_id: int) -> FeaturedAuction:
+        return await services.safe_settle(
+            self._close_featured_auction,
+            auction_id,
+            FeaturedAuction.Status.CANCELLED,
+            requester_discord_id=requester_discord_id,
+        )
+
+    async def place_featured_bid(
+        self, auction_id: int, bidder_discord_id: int, amount: int
+    ) -> tuple[FeaturedAuction, Player | None, int]:
+        return await services.safe_settle(self._place_featured_bid, auction_id, bidder_discord_id, amount)
+
+    def _place_featured_bid(
+        self, auction_id: int, bidder_discord_id: int, amount: int
+    ) -> tuple[FeaturedAuction, Player | None, int]:
+        with transaction.atomic():
+            try:
+                auction = FeaturedAuction.objects.select_for_update().get(
+                    pk=auction_id, status=FeaturedAuction.Status.ACTIVE
+                )
+            except FeaturedAuction.DoesNotExist:
+                raise RuntimeError("This featured auction is no longer active.")
+            if auction.expires_at <= timezone.now():
+                raise RuntimeError("This featured auction has already ended.")
+
+            minimum = (
+                auction.current_bid + auction.min_bid_increment if auction.current_bid else auction.starting_bid
+            )
+            if amount < minimum:
+                raise RuntimeError(f"Your bid must be at least {format_currency(minimum, False)}.")
+
+            bidder, _ = Player.objects.get_or_create(discord_id=bidder_discord_id)
+            if bidder.pk == auction.creator_id:
+                raise RuntimeError("You can't bid on your own featured auction.")
+            bidder.refresh_from_db(fields=["money"])
+            if bidder.money < amount:
+                raise RuntimeError(
+                    f"You don't have enough coins (balance: {format_currency(bidder.money, False)})."
+                )
+
+            previous_bidder = auction.current_bidder
+            previous_bid = auction.current_bid
+            bidder.money = F("money") - amount
+            bidder.save(update_fields=["money"])
+            if previous_bidder is not None and previous_bid is not None:
+                previous_bidder.money = F("money") + previous_bid
+                previous_bidder.save(update_fields=["money"])
+
+            FeaturedAuctionBid.objects.create(auction=auction, bidder=bidder, amount=amount)
+            auction.current_bid = amount
+            auction.current_bidder = bidder
+            auction.bid_count = F("bid_count") + 1
+            auction.save(update_fields=["current_bid", "current_bidder", "bid_count"])
+            auction.refresh_from_db()
+            return auction, previous_bidder, previous_bid or 0
+
+    async def _build_featured_embed(self, auction: FeaturedAuction) -> discord.Embed:
+        items = [item async for item in auction.items.select_related("instance", "instance__ball").all()]
+        creator = await Player.objects.aget(pk=auction.creator_id)
+
+        lines = [f"**Items ({len(items)}):**"]
+        for item in items:
+            lines.append(f"• {item.instance.description(include_emoji=True, bot=self.bot)}")
+        embed = discord.Embed(
+            title="🏴‍☠️ Featured Auction!",
+            description=f"**Auction #{auction.id} — {auction.title}**\n\n" + "\n".join(lines),
+            color=AUCTION_COLOR,
+        )
+        embed.add_field(name="Seller", value=f"<@{creator.discord_id}>", inline=True)
+        embed.add_field(name="Ends", value=discord.utils.format_dt(auction.expires_at, "R"), inline=True)
+        if auction.current_bid is not None and auction.current_bidder_id is not None:
+            bidder = await Player.objects.aget(pk=auction.current_bidder_id)
+            embed.add_field(
+                name="Current bid",
+                value=f"{format_currency(auction.current_bid, False, self.bot)} by <@{bidder.discord_id}>",
+                inline=False,
+            )
+            next_minimum = auction.current_bid + auction.min_bid_increment
+        else:
+            next_minimum = auction.starting_bid
+
+        recent_bids = [
+            bid
+            async for bid in FeaturedAuctionBid.objects.filter(auction=auction)
+            .select_related("bidder")
+            .order_by("-created_at")[:5]
+        ]
+        if recent_bids:
+            embed.add_field(
+                name="Recent bids",
+                value="\n".join(
+                    f"<@{bid.bidder.discord_id}> — {format_currency(bid.amount, False, self.bot)} "
+                    f"({discord.utils.format_dt(bid.created_at, 'R')})"
+                    for bid in recent_bids
+                ),
+                inline=False,
+            )
+
+        embed.add_field(name="Next minimum", value=format_currency(next_minimum, False, self.bot), inline=False)
+        embed.add_field(
+            name="​",
+            value="Use the button below (or `/auction bid`) to place a bid. Once confirmed, a bid cannot be "
+            "retracted.",
+            inline=False,
+        )
+        embed.set_footer(text=f"{auction.bid_count} bid(s) placed")
+        return embed
+
+    async def _refresh_featured_embed(self, auction_id: int):
+        try:
+            auction = await FeaturedAuction.objects.aget(pk=auction_id)
+        except FeaturedAuction.DoesNotExist:
+            return
+        if auction.message_id is None:
+            return
+        channel = self.bot.get_channel(auction.channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(auction.channel_id)
+            except discord.HTTPException:
+                return
+        try:
+            message = await channel.fetch_message(auction.message_id)
+        except discord.HTTPException:
+            return
+        embed = await self._build_featured_embed(auction)
+        try:
+            await message.edit(embed=embed)
+        except discord.HTTPException:
+            pass
+
+    async def _render_featured_close(self, auction: FeaturedAuction):
+        if auction.message_id is None:
+            return
+        channel = self.bot.get_channel(auction.channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(auction.channel_id)
+            except discord.HTTPException:
+                return
+        try:
+            message = await channel.fetch_message(auction.message_id)
+        except discord.HTTPException:
+            return
+        embed = await self._build_featured_embed(auction)
+        if auction.status == FeaturedAuction.Status.SOLD:
+            embed.title = "🏴‍☠️ Featured Auction — Sold!"
+        elif auction.status == FeaturedAuction.Status.CANCELLED:
+            embed.title = "🏴‍☠️ Featured Auction — Cancelled"
+        else:
+            embed.title = "🏴‍☠️ Featured Auction — Ended (no bids)"
+        # keep the embed and its buttons in place, just greyed out — not removed
+        closed_view = views.FeaturedAuctionView(self, auction.id)
+        for item in closed_view.children:
+            item.disabled = True  # type: ignore
+        try:
+            await message.edit(embed=embed, view=closed_view)
+        except discord.HTTPException:
+            pass
+
+        if auction.status == FeaturedAuction.Status.SOLD and auction.current_bidder_id is not None:
+            winner = await Player.objects.aget(pk=auction.current_bidder_id)
+            try:
+                await channel.send(
+                    f"\N{PARTY POPPER} <@{winner.discord_id}> won **Auction #{auction.id} — {auction.title}** "
+                    f"for **{format_currency(auction.current_bid, False, self.bot)}**!",
+                    allowed_mentions=await can_mention([winner]),
+                )
+            except discord.HTTPException:
+                log.warning("Failed to send featured auction winner announcement in channel %s", channel.id)
+
+    def _close_featured_auction(
+        self, auction_id: int, status: str, *, requester_discord_id: int | None = None
+    ) -> FeaturedAuction:
+        """
+        Manual close (cancel): refunds the current bidder and returns items to the creator.
+        `requester_discord_id` is only checked when provided — the slash command relies on the
+        broader auction-admin role check instead, while the embed's Cancel button (open to
+        anyone who can see it) restricts this to the auction's own creator.
+        """
+        with transaction.atomic():
+            try:
+                auction = (
+                    FeaturedAuction.objects.select_related("creator")
+                    .select_for_update()
+                    .get(pk=auction_id, status=FeaturedAuction.Status.ACTIVE)
+                )
+            except FeaturedAuction.DoesNotExist:
+                raise RuntimeError("This featured auction doesn't exist or has already closed.")
+            if requester_discord_id is not None and auction.creator.discord_id != requester_discord_id:
+                raise RuntimeError("Only the creator can cancel this from here.")
+            self._settle_featured_close(auction, status, award_to_bidder=False)
+            return auction
+
+    def _settle_featured_close(self, auction: FeaturedAuction, status: str, *, award_to_bidder: bool):
+        items = list(FeaturedAuctionItem.objects.filter(auction=auction).select_related("instance"))
+        if award_to_bidder and auction.current_bidder_id is not None:
+            recipient_id = auction.current_bidder_id
+            # the winning bid was escrowed from the bidder at bid time — pay it out to the creator now
+            creator = Player.objects.get(pk=auction.creator_id)
+            creator.money = F("money") + auction.current_bid
+            creator.save(update_fields=["money"])
+        else:
+            if auction.current_bidder_id is not None and auction.current_bid is not None:
+                bidder = Player.objects.get(pk=auction.current_bidder_id)
+                bidder.money = F("money") + auction.current_bid
+                bidder.save(update_fields=["money"])
+            recipient_id = auction.creator_id
+
+        for item in items:
+            item.instance.player_id = recipient_id
+            item.instance.locked = None
+            item.instance.save(update_fields=["player", "locked"])
+
+        auction.status = status
+        auction.save(update_fields=["status"])
 
     # -- activity tracking (for giveaway eligibility) ------------------------------------------
 
@@ -866,9 +1354,34 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
             offer.status = AuctionOffer.Status.REFUNDED
             offer.save(update_fields=["status"])
 
+    @tasks.loop(minutes=5)
+    async def sweep_shop_stock(self):
+        await sync_to_async(self._sweep_shop_stock)()
+
+    @sweep_shop_stock.before_loop
+    async def before_sweep_shop_stock(self):
+        await self.bot.wait_until_ready()
+
+    def _sweep_shop_stock(self):
+        auction_settings = AuctionSettings.load()
+        cutoff = timezone.now() - timedelta(hours=auction_settings.shop_listing_hours)
+        with transaction.atomic():
+            expired = list(
+                HotelStock.objects.select_for_update()
+                .filter(status=HotelStock.Status.AVAILABLE, acquired_at__lt=cutoff)
+                .select_related("instance")
+            )
+            for stock in expired:
+                stock.instance.deleted = True
+                stock.instance.save(update_fields=["deleted"])
+                stock.delete()
+
     @tasks.loop(hours=1)
     async def giveaway_draw(self):
-        await sync_to_async(self._giveaway_draw)()
+        result = await sync_to_async(self._giveaway_draw)()
+        if result is not None:
+            winner, instance, home_server_id = result
+            await self.notify_giveaway_win(winner, instance, home_server_id)
 
     @giveaway_draw.before_loop
     async def before_giveaway_draw(self):
@@ -879,42 +1392,64 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
         cutoff = timezone.now() - timedelta(hours=auction_settings.giveaway_interval_hours)
         activity_cutoff = timezone.now() - timedelta(hours=auction_settings.giveaway_activity_window_hours)
 
-        server_ids = (
-            HotelStock.objects.filter(status=HotelStock.Status.AVAILABLE)
-            .values_list("server_id", flat=True)
+        last = GiveawayLog.objects.order_by("-drawn_at").first()
+        if last is not None and last.drawn_at > cutoff:
+            return None
+
+        eligible_ids = list(
+            ServerActivity.objects.filter(last_seen__gte=activity_cutoff)
+            .values_list("player_id", flat=True)
             .distinct()
         )
-        for server_id in server_ids:
-            last = GiveawayLog.objects.filter(server_id=server_id).order_by("-drawn_at").first()
-            if last is not None and last.drawn_at > cutoff:
-                continue
+        if not eligible_ids:
+            return None
+        stock_ids = list(
+            HotelStock.objects.filter(status=HotelStock.Status.AVAILABLE).values_list("pk", flat=True)
+        )
+        if not stock_ids:
+            return None
 
-            eligible_ids = list(
-                ServerActivity.objects.filter(server_id=server_id, last_seen__gte=activity_cutoff).values_list(
-                    "player_id", flat=True
+        winner_player_id = random.choice(eligible_ids)
+        stock_id = random.choice(stock_ids)
+
+        with transaction.atomic():
+            stock = HotelStock.objects.select_related("instance").select_for_update().get(pk=stock_id)
+            if stock.status != HotelStock.Status.AVAILABLE:
+                return None
+            winner = Player.objects.get(pk=winner_player_id)
+            instance = stock.instance
+            instance.player = winner
+            instance.save(update_fields=["player"])
+            stock.status = HotelStock.Status.GIVEN_AWAY
+            stock.save(update_fields=["status"])
+
+            home_activity = ServerActivity.objects.filter(player_id=winner_player_id).order_by("-last_seen").first()
+            home_server_id = home_activity.server_id if home_activity else None
+
+            GiveawayLog.objects.create(server_id=home_server_id or 0, winner=winner, instance=instance)
+            return winner, instance, home_server_id
+
+    @tasks.loop(minutes=5)
+    async def sweep_featured_auctions(self):
+        closed = await sync_to_async(self._sweep_featured_auctions)()
+        for auction in closed:
+            await self._render_featured_close(auction)
+
+    @sweep_featured_auctions.before_loop
+    async def before_sweep_featured_auctions(self):
+        await self.bot.wait_until_ready()
+
+    def _sweep_featured_auctions(self) -> list[FeaturedAuction]:
+        now = timezone.now()
+        closed = []
+        with transaction.atomic():
+            expired = list(
+                FeaturedAuction.objects.select_for_update().filter(
+                    status=FeaturedAuction.Status.ACTIVE, expires_at__lte=now
                 )
             )
-            if not eligible_ids:
-                continue
-            stock_ids = list(
-                HotelStock.objects.filter(server_id=server_id, status=HotelStock.Status.AVAILABLE).values_list(
-                    "pk", flat=True
-                )
-            )
-            if not stock_ids:
-                continue
-
-            winner_player_id = random.choice(eligible_ids)
-            stock_id = random.choice(stock_ids)
-
-            with transaction.atomic():
-                stock = HotelStock.objects.select_related("instance").select_for_update().get(pk=stock_id)
-                if stock.status != HotelStock.Status.AVAILABLE:
-                    continue
-                winner = Player.objects.get(pk=winner_player_id)
-                instance = stock.instance
-                instance.player = winner
-                instance.save(update_fields=["player"])
-                stock.status = HotelStock.Status.GIVEN_AWAY
-                stock.save(update_fields=["status"])
-                GiveawayLog.objects.create(server_id=server_id, winner=winner, instance=instance)
+            for auction in expired:
+                status = FeaturedAuction.Status.SOLD if auction.current_bidder_id else FeaturedAuction.Status.EXPIRED_UNSOLD
+                self._settle_featured_close(auction, status, award_to_bidder=True)
+                closed.append(auction)
+        return closed

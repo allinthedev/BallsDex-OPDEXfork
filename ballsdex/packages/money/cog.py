@@ -131,18 +131,18 @@ class Money(commands.GroupCog):
             streak_day = 1
         streak_bonus = getattr(currency_settings, f"day{streak_day}_reward")
 
-        role_bonus = 0
-        bonus_role = None
+        # a player with several qualifying roles gets every matching bonus added together
+        matching_roles = []
         if interaction.guild_id is not None and isinstance(interaction.user, discord.Member):
             member_role_ids = [role.id for role in interaction.user.roles]
             if member_role_ids:
-                async for candidate in DailyBonusRole.objects.filter(
-                    server__server_id=interaction.guild_id, role_id__in=member_role_ids
-                ):
-                    if bonus_role is None or candidate.bonus_amount > bonus_role.bonus_amount:
-                        bonus_role = candidate
-            if bonus_role is not None:
-                role_bonus = bonus_role.bonus_amount
+                matching_roles = [
+                    candidate
+                    async for candidate in DailyBonusRole.objects.filter(
+                        server__server_id=interaction.guild_id, role_id__in=member_role_ids
+                    )
+                ]
+        role_bonus = sum(candidate.bonus_amount for candidate in matching_roles)
         total = currency_settings.base_daily_amount + streak_bonus + role_bonus
 
         cooldown_end = now + timedelta(hours=24)
@@ -157,8 +157,8 @@ class Money(commands.GroupCog):
             f"**{currency_settings.base_daily_amount:,}** {emoji} claimed!",
             f"+{streak_bonus:,} bonus for streak - {streak_day}/7 days streak \N{FIRE}",
         ]
-        if bonus_role is not None:
-            lines.append(f"+{role_bonus:,} bonus applied for being a <@&{bonus_role.role_id}> supporter")
+        for candidate in matching_roles:
+            lines.append(f"+{candidate.bonus_amount:,} bonus applied for being a <@&{candidate.role_id}> supporter")
         lines.append(f"Come back tomorrow {format_dt(cooldown_end, 'R')}")
 
         embed = discord.Embed(description="\n".join(lines), color=discord.Colour.gold())
