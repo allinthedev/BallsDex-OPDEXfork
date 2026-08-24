@@ -137,8 +137,12 @@ def settle_direct_sale(instance_id: int, price: int, resale_price: int, server_i
     concurrent trade or a second /sell on the same treasure).
     """
     with transaction.atomic():
+        # `special` is a nullable FK — Postgres refuses FOR UPDATE across the nullable side of an
+        # outer join, so the lock is restricted to the BallInstance row itself via `of=("self",)`.
         instance = (
-            BallInstance.objects.select_related("player", "ball", "special").select_for_update().get(pk=instance_id)
+            BallInstance.objects.select_related("player", "ball", "special")
+            .select_for_update(of=("self",))
+            .get(pk=instance_id)
         )
         if instance.player_id != expected_player_id:
             raise RuntimeError("This treasure changed hands before the sale could complete — nothing was charged.")
