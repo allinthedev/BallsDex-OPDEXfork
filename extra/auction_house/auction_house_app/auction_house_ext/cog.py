@@ -371,11 +371,12 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
     async def cancel_listing_autocomplete(
         self, interaction: discord.Interaction["BallsDexBot"], current: str
     ) -> list[app_commands.Choice[int]]:
-        qs = (
-            AuctionListing.objects.filter(seller__discord_id=interaction.user.id, status=AuctionListing.Status.ACTIVE)
-            .select_related("instance")
-            .order_by("expires_at")[:25]
+        qs = AuctionListing.objects.filter(
+            seller__discord_id=interaction.user.id, status=AuctionListing.Status.ACTIVE
         )
+        if current:
+            qs = qs.filter(instance__ball__country__icontains=current)
+        qs = qs.select_related("instance").order_by("expires_at")[:25]
         return [
             app_commands.Choice(name=f"#{listing.id} {listing.instance.short_description()}", value=listing.id)
             async for listing in qs
@@ -528,11 +529,10 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
     async def bid_autocomplete(
         self, interaction: discord.Interaction["BallsDexBot"], current: str
     ) -> list[app_commands.Choice[int]]:
-        qs = (
-            AuctionListing.objects.filter(status=AuctionListing.Status.ACTIVE)
-            .select_related("instance")
-            .order_by("expires_at")[:25]
-        )
+        qs = AuctionListing.objects.filter(status=AuctionListing.Status.ACTIVE)
+        if current:
+            qs = qs.filter(instance__ball__country__icontains=current)
+        qs = qs.select_related("instance").order_by("expires_at")[:25]
         return [
             app_commands.Choice(
                 name=f"#{listing.id} {listing.instance.short_description()} — "
@@ -900,7 +900,10 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
         if auction_settings.max_shop_rarity is not None:
             qs = qs.filter(instance__ball__rarity__lte=auction_settings.max_shop_rarity)
         cutoff = timezone.now() - timedelta(hours=auction_settings.shop_listing_hours)
-        qs = qs.filter(acquired_at__gte=cutoff).select_related("instance").order_by("resale_price")[:25]
+        qs = qs.filter(acquired_at__gte=cutoff)
+        if current:
+            qs = qs.filter(instance__ball__country__icontains=current)
+        qs = qs.select_related("instance").order_by("resale_price")[:25]
         return [
             app_commands.Choice(
                 name=f"#{item.id} {item.instance.short_description()} — {format_currency(item.resale_price)}",
