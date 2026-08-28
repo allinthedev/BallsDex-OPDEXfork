@@ -36,8 +36,11 @@ class AuctionSettingsAdmin(admin.ModelAdmin):
             {"fields": ["direct_sale_daily_limit", "max_active_listings"]},
         ),
         ("Resale shop", {"fields": ["resale_markup_percent", "max_shop_rarity", "shop_listing_hours"]}),
-        ("Listing duration", {"fields": ["min_listing_hours", "max_listing_hours"]}),
-        ("Giveaway", {"fields": ["giveaway_interval_hours", "giveaway_activity_window_hours"]}),
+        ("Listing duration", {"fields": ["min_listing_minutes", "max_listing_minutes"]}),
+        (
+            "Giveaway",
+            {"fields": ["giveaway_interval_hours", "giveaway_activity_window_hours", "giveaway_server_id"]},
+        ),
     ]
     filter_horizontal = ("excluded_balls",)
 
