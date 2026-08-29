@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, cast
 import discord
 from asgiref.sync import async_to_sync, sync_to_async
 from achievement_app.models import AchievementType, notify_user, progress_achievement
+from currency_app.ledger import adjust_money
+from currency_app.models import BerryTransaction
 from discord.ui import ActionRow, Button, Item, Section, Select, Separator, TextDisplay, TextInput, Thumbnail
 from discord.utils import format_dt, utcnow
 from django.db import transaction
@@ -708,10 +710,18 @@ class TradeInstance(LayoutView):
         if self.trader1.money or self.trader2.money:
             player1 = money_check(self.trader1)
             player2 = money_check(self.trader2)
-            player1.money += self.trader2.money - self.trader1.money
-            player2.money += self.trader1.money - self.trader2.money
-            player1.save(update_fields=("money",))
-            player2.save(update_fields=("money",))
+            adjust_money(
+                player1,
+                self.trader2.money - self.trader1.money,
+                reason=BerryTransaction.Reason.TRADE,
+                description=f"Trade #{trade.pk:0X} with {player2.discord_id}",
+            )
+            adjust_money(
+                player2,
+                self.trader1.money - self.trader2.money,
+                reason=BerryTransaction.Reason.TRADE,
+                description=f"Trade #{trade.pk:0X} with {player1.discord_id}",
+            )
 
         p1_unlocked = []
         p2_unlocked = []

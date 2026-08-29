@@ -50,6 +50,7 @@ admin_panel/admin_panel/settings/production.py
 # extra package dev
 extra/*
 !extra/.gitkeep
+!extra/augment
 !extra/balls_extension
 !extra/collectible
 !extra/pack

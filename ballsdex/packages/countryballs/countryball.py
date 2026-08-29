@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 import discord
-from currency_app.models import CurrencySettings
+from currency_app.models import BerryTransaction, CurrencySettings
 from discord.ui import ActionRow, Button, Item, MediaGallery, TextDisplay, TextInput, button
 from django.utils import timezone
 
@@ -85,7 +85,12 @@ class CountryballNamePrompt(Modal, title=f"Catch this {settings.collectible_name
         if self.view.ballinstance is None:
             if random.random() < currency_settings.spawn_chance:
                 amount = currency_settings.spawn_amount
-                await player.add_money(amount)
+                await player.add_money(
+                    amount,
+                    reason=BerryTransaction.Reason.SPAWN_CATCH,
+                    description=f"Caught {ball.description(short=True)}",
+                    server_id=interaction.guild_id,
+                )
                 text += f"You get **{format_currency(amount, False, self.view.bot)}**"
 
         await interaction.followup.send(text, allowed_mentions=discord.AllowedMentions(users=player.can_be_mentioned))

@@ -162,18 +162,30 @@ class Player(models.Model):
     def can_be_mentioned(self) -> bool:
         return self.mention_policy == MentionPolicy.ALLOW
 
-    async def add_money(self, amount: int) -> int:
+    async def add_money(
+        self, amount: int, *, reason: str = "", description: str = "", server_id: int | None = None
+    ) -> int:
+        """
+        Credits the player and records the movement in the berry ledger.
+
+        `reason` should be one of `currency_app.models.BerryTransaction.Reason`. It defaults to
+        "unknown" rather than being required, so a caller that forgets still leaves a trace —
+        an unexplained movement in the ledger is far better than a silent one.
+        """
         if amount <= 0:
             raise ValueError("Amount to add must be positive")
-        self.money += amount
-        await self.asave(update_fields=("money",))
-        return self.money
+        # imported lazily: currency_app imports this module, so a top-level import would cycle
+        from currency_app.ledger import aadjust_money
 
-    async def remove_money(self, amount: int) -> None:
-        if self.money < amount:
-            raise ValueError("Not enough money")
-        self.money -= amount
-        await self.asave(update_fields=("money",))
+        return await aadjust_money(self, amount, reason=reason, description=description, server_id=server_id)
+
+    async def remove_money(
+        self, amount: int, *, reason: str = "", description: str = "", server_id: int | None = None
+    ) -> None:
+        """Debits the player and records the movement. See [`add_money`][] for `reason`."""
+        from currency_app.ledger import aadjust_money
+
+        await aadjust_money(self, -amount, reason=reason, description=description, server_id=server_id)
 
     def can_afford(self, amount: int) -> bool:
         return self.money >= amount

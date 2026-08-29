@@ -1,0 +1,7 @@
+[project]
+name = "augment"
+version = "1.0.0"
+
+description = "Adds the /augment command, letting players spend berries to reroll a card's stats."
+
+dependencies = []

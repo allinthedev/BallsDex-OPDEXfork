@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING, cast
 
 import discord
 from asgiref.sync import sync_to_async
+from currency_app.ledger import adjust_money
+from currency_app.models import BerryTransaction
 from discord.ext import commands
 from discord.utils import format_dt
 from django.core.files.base import ContentFile
@@ -408,10 +410,19 @@ async def balls_transferinv(
         TradeObject.objects.bulk_create(trade_objects)
         updated = qs.update(player=dest_player, trade_player=source_player)
         if currency:
-            dest_player.money += source_player.money
-            source_player.money = 0
-            dest_player.save(update_fields=("money",))
-            source_player.save(update_fields=("money",))
+            transferred = source_player.money
+            adjust_money(
+                source_player,
+                -transferred,
+                reason=BerryTransaction.Reason.ADMIN_ADJUST,
+                description=f"Account transfer to {dest_player.discord_id}",
+            )
+            adjust_money(
+                dest_player,
+                transferred,
+                reason=BerryTransaction.Reason.ADMIN_ADJUST,
+                description=f"Account transfer from {source_player.discord_id}",
+            )
         return updated
 
     updated = await sync_to_async(perform_transfer)()

@@ -9,8 +9,9 @@ import logging
 
 import discord
 from asgiref.sync import sync_to_async
+from currency_app.ledger import adjust_money
+from currency_app.models import BerryTransaction
 from django.db import transaction
-from django.db.models import F
 from django.utils import timezone
 
 from bd_models.models import BallInstance
@@ -24,6 +25,8 @@ from .models import (
     AuctionListing,
     AuctionSettings,
     DirectSaleRecord,
+    FeaturedAuction,
+    FeaturedAuctionItem,
     HotelStock,
     SpecialPriceModifier,
     StatBonusModifier,
@@ -102,10 +105,20 @@ async def is_auction_admin(user: discord.User | discord.Member, server_id: int) 
 
 
 async def is_already_committed(instance: "BallInstance") -> bool:
-    listed = await AuctionListing.objects.filter(instance=instance, status=AuctionListing.Status.ACTIVE).aexists()
-    if listed:
+    """
+    Whether this treasure is currently tied up somewhere in the auction house.
+
+    Only *live* commitments count. Closed records (an expired listing, stock Buggy already
+    sold or gave away, a finished featured auction) are kept as history, and a treasure that
+    came back from one of those must be sellable and listable again.
+    """
+    if await AuctionListing.objects.filter(instance=instance, status=AuctionListing.Status.ACTIVE).aexists():
         return True
-    return await HotelStock.objects.filter(instance=instance).aexists()
+    if await HotelStock.objects.filter(instance=instance, status=HotelStock.Status.AVAILABLE).aexists():
+        return True
+    return await FeaturedAuctionItem.objects.filter(
+        instance=instance, auction__status=FeaturedAuction.Status.ACTIVE
+    ).aexists()
 
 
 async def direct_sale_count_today(player_id: int) -> int:
@@ -153,8 +166,13 @@ def settle_direct_sale(instance_id: int, price: int, resale_price: int, server_i
         attack_bonus = instance.attack_bonus
         health_bonus = instance.health_bonus
 
-        player.money = F("money") + price
-        player.save(update_fields=["money"])
+        adjust_money(
+            player,
+            price,
+            reason=BerryTransaction.Reason.AUCTION_SELL,
+            description=f"Sold {ball_name}{f' [{special_name}]' if special_name else ''} to Buggy",
+            server_id=server_id,
+        )
 
         hotel = get_hotel_player_sync()
         instance.player = hotel

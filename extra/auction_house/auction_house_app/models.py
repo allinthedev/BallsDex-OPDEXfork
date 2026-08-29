@@ -47,11 +47,11 @@ class AuctionSettings(models.Model):
         default=10, help_text="Markup applied when the Hotel relists a card it bought directly from a player."
     )
 
-    min_listing_hours = models.PositiveIntegerField(
-        default=1, help_text="Minimum duration a player can choose when listing a card for auction."
+    min_listing_minutes = models.PositiveIntegerField(
+        default=60, help_text="Minimum duration a player can choose when listing a card for auction, in minutes."
     )
-    max_listing_hours = models.PositiveIntegerField(
-        default=72, help_text="Maximum duration a player can choose when listing a card for auction."
+    max_listing_minutes = models.PositiveIntegerField(
+        default=4320, help_text="Maximum duration a player can choose when listing a card for auction, in minutes."
     )
 
     giveaway_interval_hours = models.PositiveIntegerField(
@@ -59,6 +59,12 @@ class AuctionSettings(models.Model):
     )
     giveaway_activity_window_hours = models.PositiveIntegerField(
         default=24, help_text="A player must have used a bot command within this window to be eligible to win."
+    )
+    giveaway_server_id = models.BigIntegerField(
+        null=True,
+        blank=True,
+        help_text="Restrict giveaways to this server: only players active here can win, and the announcement is "
+        "posted here. Leave empty to draw from players across every server the bot is in.",
     )
 
     shop_listing_hours = models.PositiveIntegerField(
@@ -89,8 +95,8 @@ class AuctionSettings(models.Model):
         constraints = [
             models.CheckConstraint(condition=Q(min_price__lte=F("max_price")), name="auctionsettings_price_min_lte_max"),
             models.CheckConstraint(
-                condition=Q(min_listing_hours__lte=F("max_listing_hours")),
-                name="auctionsettings_listing_hours_min_lte_max",
+                condition=Q(min_listing_minutes__lte=F("max_listing_minutes")),
+                name="auctionsettings_listing_minutes_min_lte_max",
             ),
         ]
 
@@ -175,11 +181,14 @@ class AuctionListing(models.Model):
         EXPIRED = "expired", "Expired"
         CANCELLED = "cancelled", "Cancelled"
 
-    instance = models.OneToOneField(BallInstance, on_delete=models.CASCADE, related_name="auction_listing")
+    # Deliberately a plain FK, not a OneToOne: expired/cancelled/sold listings are kept as history,
+    # and a treasure that came back unsold must be listable again. Only one *active* listing per
+    # treasure is allowed, which the partial unique constraint below enforces at the DB level.
+    instance = models.ForeignKey(BallInstance, on_delete=models.CASCADE, related_name="auction_listings")
     seller = models.ForeignKey(Player, on_delete=models.CASCADE, related_name="auction_listings")
     server_id = models.BigIntegerField()
     asking_price = models.PositiveBigIntegerField()
-    duration_hours = models.PositiveIntegerField()
+    duration_minutes = models.PositiveIntegerField()
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.ACTIVE)
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField()
@@ -194,6 +203,13 @@ class AuctionListing(models.Model):
             models.Index(fields=("seller", "status")),
             models.Index(fields=("status", "expires_at")),
         )
+        constraints = [
+            models.UniqueConstraint(
+                fields=("instance",),
+                condition=Q(status="active"),
+                name="auctionlisting_one_active_per_instance",
+            )
+        ]
 
     def __str__(self) -> str:
         return f"Listing #{self.pk} ({self.status})"
@@ -231,7 +247,9 @@ class HotelStock(models.Model):
         SOLD = "sold", "Sold"
         GIVEN_AWAY = "given_away", "Given away"
 
-    instance = models.OneToOneField(BallInstance, on_delete=models.CASCADE, related_name="hotel_stock")
+    # Plain FK for the same reason as AuctionListing.instance: sold/given-away rows are kept as
+    # history, and a treasure that left Buggy's shop can be sold back to him later.
+    instance = models.ForeignKey(BallInstance, on_delete=models.CASCADE, related_name="hotel_stocks")
     server_id = models.BigIntegerField()
     buyout_price = models.PositiveBigIntegerField(help_text="What the Hotel paid the original seller.")
     resale_price = models.PositiveBigIntegerField(help_text="Price the Hotel resells this card for.")
@@ -242,6 +260,13 @@ class HotelStock(models.Model):
         managed = True
         db_table = "auctionhotelstock"
         indexes = (models.Index(fields=("server_id", "status")),)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("instance",),
+                condition=Q(status="available"),
+                name="auctionhotelstock_one_available_per_instance",
+            )
+        ]
 
     def __str__(self) -> str:
         return f"Hotel stock #{self.pk} ({self.status})"
@@ -398,7 +423,11 @@ class FeaturedAuction(models.Model):
 
 class FeaturedAuctionItem(models.Model):
     auction = models.ForeignKey(FeaturedAuction, on_delete=models.CASCADE, related_name="items")
-    instance = models.OneToOneField(BallInstance, on_delete=models.CASCADE, related_name="featured_auction_item")
+    # Plain FK for the same reason as AuctionListing.instance: closed auctions are kept as history,
+    # so a treasure can appear in a later auction. "Only one live commitment per treasure" can't be a
+    # partial constraint here (the status lives on the parent auction), so it's enforced in
+    # services.is_already_committed instead.
+    instance = models.ForeignKey(BallInstance, on_delete=models.CASCADE, related_name="featured_auction_items")
 
     class Meta:
         managed = True

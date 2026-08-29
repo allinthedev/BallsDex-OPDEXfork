@@ -39,6 +39,14 @@ def default_migrate_coins_backward(apps: "Apps", schema_editor: "BaseDatabaseSch
 
 
 class Migration(migrations.Migration):
-    dependencies = [("currency_app", "0006_remove_item_ball_itemball")]
+    dependencies = [
+        ("currency_app", "0006_remove_item_ball_itemball"),
+        # This RunPython reads/writes bd_models.Player.money and settings.Settings.currency_*
+        # fields directly via apps.get_model() — without these, a from-scratch `migrate` can
+        # order this before either app has created those fields, crashing with a LookupError
+        # or missing-column error.
+        ("bd_models", "0016_alter_player_money"),
+        ("settings", "0007_settings_currency_emoji_id"),
+    ]
 
     operations = [migrations.RunPython(default_migrate_coins_forward, default_migrate_coins_backward, atomic=True)]

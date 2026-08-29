@@ -3,12 +3,12 @@ from typing import TYPE_CHECKING
 
 import discord
 from asgiref.sync import sync_to_async
-from currency_app.models import CurrencySettings, DailyBonusRole
+from currency_app.ledger import adjust_money
+from currency_app.models import BerryTransaction, CurrencySettings, DailyBonusRole
 from discord import app_commands
 from discord.ext import commands
 from discord.utils import format_dt
 from django.db import transaction
-from django.db.models import F
 from django.utils import timezone
 
 from ballsdex.core.utils.utils import can_mention
@@ -50,10 +50,18 @@ class Money(commands.GroupCog):
             raise RuntimeError(
                 f"Player's balance changed, cannot afford donation anymore {amount=} {old_player.money=}"
             )
-        old_player.money = F("money") - amount
-        new_player.money = F("money") + amount
-        old_player.save(update_fields=["money"])
-        new_player.save(update_fields=["money"])
+        adjust_money(
+            old_player,
+            -amount,
+            reason=BerryTransaction.Reason.GIVE_SENT,
+            description=f"Gave to {new_player.discord_id}",
+        )
+        adjust_money(
+            new_player,
+            amount,
+            reason=BerryTransaction.Reason.GIVE_RECEIVED,
+            description=f"Received from {old_player.discord_id}",
+        )
         return Trade.objects.create(player1=old_player, player2=new_player, player1_money=amount)
 
     @app_commands.command()
@@ -149,7 +157,12 @@ class Money(commands.GroupCog):
         player.extra_data["berry_daily_cooldown"] = cooldown_end.isoformat()
         player.extra_data["daily_last_claim_at"] = now.isoformat()
         player.extra_data["daily_streak_day"] = streak_day
-        await player.add_money(total)
+        await player.add_money(
+            total,
+            reason=BerryTransaction.Reason.DAILY,
+            description=f"Day {streak_day}/7 streak (+{streak_bonus:,} streak, +{role_bonus:,} roles)",
+            server_id=interaction.guild_id,
+        )
         await player.asave(update_fields=("extra_data",))
 
         emoji = settings.currency_emoji(self.bot) or settings.currency_symbol or ""

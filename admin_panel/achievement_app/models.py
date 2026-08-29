@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 import discord
 from discord.ui import Container, LayoutView, Section, Separator, TextDisplay, Thumbnail
 from django.db import models
+from currency_app.models import BerryTransaction
 from django.utils import timezone
 
 from bd_models.models import Ball, BallGroup, Player, Special, balls, groups, specials
@@ -223,7 +224,11 @@ async def progress_achievement(
             user_achievement.completed_at = timezone.now()
 
             unlocked.append(achievement)
-            await player.add_money(achievement.currency_reward)
+            await player.add_money(
+                achievement.currency_reward,
+                reason=BerryTransaction.Reason.ACHIEVEMENT,
+                description=f"Unlocked {achievement.name}",
+            )
 
         to_update.append(user_achievement)
 
