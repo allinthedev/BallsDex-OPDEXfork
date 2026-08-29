@@ -146,9 +146,9 @@ class BerryTransaction(models.Model):
         managed = True
         db_table = "berrytransaction"
         indexes = (
-            models.Index(fields=("player", "-created_at")),
-            models.Index(fields=("reason",)),
-            models.Index(fields=("-created_at",)),
+            models.Index(fields=("player", "-created_at"), name="berrytx_player__created_idx"),
+            models.Index(fields=("reason",), name="berrytx_reason_idx"),
+            models.Index(fields=("-created_at",), name="berrytx_created_idx"),
         )
 
     def __str__(self) -> str:
