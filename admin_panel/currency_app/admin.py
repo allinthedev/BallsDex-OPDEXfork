@@ -101,7 +101,9 @@ class BerryTransactionAdmin(admin.ModelAdmin):
     @admin.display(description="Amount", ordering="amount")
     def signed_amount(self, obj: BerryTransaction):
         color = "green" if obj.amount >= 0 else "crimson"
-        return format_html('<span style="color: {}">{:+,}</span>', color, obj.amount)
+        # format_html turns its arguments into strings before formatting them, so the number
+        # has to be rendered here rather than through a numeric format spec in the template
+        return format_html('<span style="color: {}">{}</span>', color, f"{obj.amount:+,}")
 
     def has_add_permission(self, request: HttpRequest) -> bool:
         return False
