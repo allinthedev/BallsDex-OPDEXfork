@@ -2,6 +2,8 @@ import logging
 
 import discord
 from asgiref.sync import sync_to_async
+from currency_app.ledger import aadjust_money_to, reset_all_balances
+from currency_app.models import BerryTransaction
 from discord.ext import commands
 from django.db import connection
 
@@ -64,7 +66,12 @@ async def add(ctx: commands.Context[BallsDexBot], user: discord.User, amount: in
         await ctx.send("The amount must be greater than zero.", ephemeral=True)
         return
 
-    await player.add_money(amount)
+    await player.add_money(
+        amount,
+        reason=BerryTransaction.Reason.ADMIN_ADJUST,
+        description=f"/money add by {ctx.author.id}",
+        server_id=ctx.guild.id if ctx.guild else None,
+    )
     await ctx.send(f"{amount:,} coins have been added to {user.mention}.", ephemeral=True)
     log.info(f"{ctx.author} ({ctx.author.id}) added {amount:,} coins to {user} ({user.id})", extra={"webhook": True})
 
@@ -93,7 +100,12 @@ async def remove(ctx: commands.Context[BallsDexBot], user: discord.User, amount:
     if not player.can_afford(amount):
         await ctx.send(f"This user does not have enough coins to remove (balance={player.money:,}).", ephemeral=True)
         return
-    await player.remove_money(amount)
+    await player.remove_money(
+        amount,
+        reason=BerryTransaction.Reason.ADMIN_ADJUST,
+        description=f"/money remove by {ctx.author.id}",
+        server_id=ctx.guild.id if ctx.guild else None,
+    )
     await ctx.send(f"{amount:,} coins have been removed from {user.mention}.", ephemeral=True)
     log.info(
         f"{ctx.author} ({ctx.author.id}) removed {amount:,} coins from {user} ({user.id})", extra={"webhook": True}
@@ -122,8 +134,13 @@ async def set(ctx: commands.Context[BallsDexBot], user: discord.User, amount: in
         await ctx.send("The amount must be greater than or equal to zero.", ephemeral=True)
         return
 
-    player.money = amount
-    await player.asave()
+    await aadjust_money_to(
+        player,
+        amount,
+        reason=BerryTransaction.Reason.ADMIN_ADJUST,
+        description=f"/money set by {ctx.author.id}",
+        server_id=ctx.guild.id if ctx.guild else None,
+    )
     await ctx.send(f"{user.mention} now has {amount:,} coins.", ephemeral=True)
     log.info(
         f"{ctx.author} ({ctx.author.id}) set the balance of {user} ({user.id}) to {amount:,} coins",
@@ -164,6 +181,6 @@ async def setdefault(ctx: commands.Context[BallsDexBot], amount: int, force: boo
 
     await wrapper()
     if force:
-        await Player.objects.all().aupdate(money=amount)
+        await sync_to_async(reset_all_balances)(amount, ctx.author.id)
 
     await ctx.send("New default set.")

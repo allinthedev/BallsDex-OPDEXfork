@@ -9,8 +9,9 @@ import logging
 
 import discord
 from asgiref.sync import sync_to_async
+from currency_app.ledger import adjust_money
+from currency_app.models import BerryTransaction
 from django.db import transaction
-from django.db.models import F
 from django.utils import timezone
 
 from bd_models.models import BallInstance
@@ -165,8 +166,13 @@ def settle_direct_sale(instance_id: int, price: int, resale_price: int, server_i
         attack_bonus = instance.attack_bonus
         health_bonus = instance.health_bonus
 
-        player.money = F("money") + price
-        player.save(update_fields=["money"])
+        adjust_money(
+            player,
+            price,
+            reason=BerryTransaction.Reason.AUCTION_SELL,
+            description=f"Sold {ball_name}{f' [{special_name}]' if special_name else ''} to Buggy",
+            server_id=server_id,
+        )
 
         hotel = get_hotel_player_sync()
         instance.player = hotel

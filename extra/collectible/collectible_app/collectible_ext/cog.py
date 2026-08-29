@@ -1,5 +1,6 @@
 from typing import TYPE_CHECKING
 
+from currency_app.models import BerryTransaction
 import discord
 from currency_app.models import CurrencySettings
 from discord import app_commands
@@ -93,7 +94,12 @@ class Collectible(commands.GroupCog):
                 )
                 return
             else:
-                await player.remove_money(collectible.price)
+                await player.remove_money(
+                    collectible.price,
+                    reason=BerryTransaction.Reason.COLLECTIBLE_BUY,
+                    description=f"Bought collectible {collectible.name}",
+                    server_id=interaction.guild_id,
+                )
 
         await CollectibleInstance.objects.acreate(player=player, collectible=collectible)
         await interaction.followup.send(f"You've claimed **{collectible.name}!** Congratulations!")

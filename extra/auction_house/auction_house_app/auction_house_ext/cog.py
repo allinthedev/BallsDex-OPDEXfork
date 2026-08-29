@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 import discord
 from asgiref.sync import sync_to_async
 from auction_house_app import pricing, services
+from currency_app.ledger import adjust_money
+from currency_app.models import BerryTransaction
 from auction_house_app.models import (
     AuctionGuildConfig,
     AuctionListing,
@@ -381,9 +383,13 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
                 listing=listing, status=AuctionOffer.Status.PENDING
             ).select_related("buyer")
             for offer in pending:
-                buyer = offer.buyer
-                buyer.money = F("money") + offer.amount
-                buyer.save(update_fields=["money"])
+                adjust_money(
+                    offer.buyer,
+                    offer.amount,
+                    reason=BerryTransaction.Reason.AUCTION_BID_REFUND,
+                    description=f"Listing #{listing.pk} withdrawn by the seller",
+                    server_id=listing.server_id,
+                )
                 offer.status = AuctionOffer.Status.REFUNDED
                 offer.save(update_fields=["status"])
             return listing
@@ -542,8 +548,13 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
                     "Your balance changed and you can no longer afford this bid "
                     f"(balance: {format_currency(buyer.money, False)}, bid: {format_currency(amount, False)})."
                 )
-            buyer.money = F("money") - amount
-            buyer.save(update_fields=["money"])
+            adjust_money(
+                buyer,
+                -amount,
+                reason=BerryTransaction.Reason.AUCTION_BID_HOLD,
+                description=f"Bid on listing #{listing.pk}",
+                server_id=listing.server_id,
+            )
             AuctionOffer.objects.create(listing=listing, buyer=buyer, amount=amount)
 
     @bid.autocomplete("listing_id")
@@ -610,9 +621,12 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
             if offer.status != AuctionOffer.Status.PENDING:
                 raise RuntimeError("This bid is no longer pending.")
 
-            buyer = offer.buyer
-            buyer.money = F("money") + offer.amount
-            buyer.save(update_fields=["money"])
+            adjust_money(
+                offer.buyer,
+                offer.amount,
+                reason=BerryTransaction.Reason.AUCTION_BID_REFUND,
+                description=f"Cancelled own bid on listing #{offer.listing_id}",
+            )
             offer.status = AuctionOffer.Status.CANCELLED
             offer.save(update_fields=["status"])
             return offer
@@ -644,8 +658,12 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
                     f"You don't have enough coins to add that much (balance: "
                     f"{format_currency(buyer.money, False)})."
                 )
-            buyer.money = F("money") - additional
-            buyer.save(update_fields=["money"])
+            adjust_money(
+                buyer,
+                -additional,
+                reason=BerryTransaction.Reason.AUCTION_BID_HOLD,
+                description=f"Raised bid on listing #{offer.listing_id}",
+            )
             offer.amount = F("amount") + additional
             offer.save(update_fields=["amount"])
             # refresh only `amount` (not a full refresh_from_db): that keeps the already
@@ -726,9 +744,13 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
             if listing.status != AuctionListing.Status.ACTIVE or offer.status != AuctionOffer.Status.PENDING:
                 raise RuntimeError("This bid is no longer available.")
 
-            seller = listing.seller
-            seller.money = F("money") + offer.amount
-            seller.save(update_fields=["money"])
+            adjust_money(
+                listing.seller,
+                offer.amount,
+                reason=BerryTransaction.Reason.AUCTION_SALE_PAYOUT,
+                description=f"Listing #{listing.pk} sold",
+                server_id=listing.server_id,
+            )
 
             instance = listing.instance
             instance.player = offer.buyer
@@ -744,9 +766,13 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
                 pk=offer.pk
             )
             for other in others.select_related("buyer"):
-                other_buyer = other.buyer
-                other_buyer.money = F("money") + other.amount
-                other_buyer.save(update_fields=["money"])
+                adjust_money(
+                    other.buyer,
+                    other.amount,
+                    reason=BerryTransaction.Reason.AUCTION_BID_REFUND,
+                    description=f"Outbid on listing #{listing.pk}",
+                    server_id=listing.server_id,
+                )
                 other.status = AuctionOffer.Status.REFUNDED
                 other.save(update_fields=["status"])
 
@@ -768,9 +794,12 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
             if offer.status != AuctionOffer.Status.PENDING:
                 raise RuntimeError("This bid is no longer pending.")
 
-            buyer = offer.buyer
-            buyer.money = F("money") + offer.amount
-            buyer.save(update_fields=["money"])
+            adjust_money(
+                offer.buyer,
+                offer.amount,
+                reason=BerryTransaction.Reason.AUCTION_BID_REFUND,
+                description=f"Bid rejected on listing #{offer.listing_id}",
+            )
             offer.status = AuctionOffer.Status.REJECTED
             offer.save(update_fields=["status"])
             return offer
@@ -904,8 +933,13 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
                     "You don't have enough coins anymore "
                     f"(balance: {format_currency(buyer.money, False)}, price: {format_currency(price, False)})."
                 )
-            buyer.money = F("money") - price
-            buyer.save(update_fields=["money"])
+            adjust_money(
+                buyer,
+                -price,
+                reason=BerryTransaction.Reason.AUCTION_SHOP_BUY,
+                description=f"Bought stock #{stock.pk} from Buggy's shop",
+                server_id=stock.server_id,
+            )
             instance = stock.instance
             instance.player = buyer
             instance.save(update_fields=["player"])
@@ -1157,11 +1191,21 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
 
             previous_bidder = auction.current_bidder
             previous_bid = auction.current_bid
-            bidder.money = F("money") - amount
-            bidder.save(update_fields=["money"])
+            adjust_money(
+                bidder,
+                -amount,
+                reason=BerryTransaction.Reason.FEATURED_BID_HOLD,
+                description=f"Bid on featured auction #{auction.pk} ({auction.title})",
+                server_id=auction.server_id,
+            )
             if previous_bidder is not None and previous_bid is not None:
-                previous_bidder.money = F("money") + previous_bid
-                previous_bidder.save(update_fields=["money"])
+                adjust_money(
+                    previous_bidder,
+                    previous_bid,
+                    reason=BerryTransaction.Reason.FEATURED_BID_REFUND,
+                    description=f"Outbid on featured auction #{auction.pk} ({auction.title})",
+                    server_id=auction.server_id,
+                )
 
             FeaturedAuctionBid.objects.create(auction=auction, bidder=bidder, amount=amount)
             auction.current_bid = amount
@@ -1314,14 +1358,22 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
         if award_to_bidder and auction.current_bidder_id is not None:
             recipient_id = auction.current_bidder_id
             # the winning bid was escrowed from the bidder at bid time — pay it out to the creator now
-            creator = Player.objects.get(pk=auction.creator_id)
-            creator.money = F("money") + auction.current_bid
-            creator.save(update_fields=["money"])
+            adjust_money(
+                auction.creator_id,
+                auction.current_bid,
+                reason=BerryTransaction.Reason.FEATURED_PAYOUT,
+                description=f"Featured auction #{auction.pk} sold ({auction.title})",
+                server_id=auction.server_id,
+            )
         else:
             if auction.current_bidder_id is not None and auction.current_bid is not None:
-                bidder = Player.objects.get(pk=auction.current_bidder_id)
-                bidder.money = F("money") + auction.current_bid
-                bidder.save(update_fields=["money"])
+                adjust_money(
+                    auction.current_bidder_id,
+                    auction.current_bid,
+                    reason=BerryTransaction.Reason.FEATURED_BID_REFUND,
+                    description=f"Featured auction #{auction.pk} closed unsold ({auction.title})",
+                    server_id=auction.server_id,
+                )
             recipient_id = auction.creator_id
 
         for item in items:
@@ -1380,9 +1432,13 @@ class AuctionHouse(commands.GroupCog, name="Buggy's Auction House", group_name="
             "buyer"
         )
         for offer in pending:
-            buyer = offer.buyer
-            buyer.money = F("money") + offer.amount
-            buyer.save(update_fields=["money"])
+            adjust_money(
+                offer.buyer,
+                offer.amount,
+                reason=BerryTransaction.Reason.AUCTION_BID_REFUND,
+                description=f"Listing #{listing.pk} expired unsold",
+                server_id=listing.server_id,
+            )
             offer.status = AuctionOffer.Status.REFUNDED
             offer.save(update_fields=["status"])
 

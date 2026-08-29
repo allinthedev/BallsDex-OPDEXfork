@@ -78,6 +78,83 @@ class DailyBonusRole(models.Model):
         return f"Role {self.role_id} (+{self.bonus_amount})"
 
 
+class BerryTransaction(models.Model):
+    """
+    One row per berry movement, for every player.
+
+    Written by `currency_app.ledger.adjust_money`, which is the single path every balance
+    change goes through. `balance_after` is the balance once the change was applied, so a
+    player's rows replayed in order must reproduce their current balance — see the admin
+    list, which flags any row that doesn't line up with the one before it.
+    """
+
+    DESCRIPTION_MAX_LENGTH = 256
+
+    class Reason(models.TextChoices):
+        UNKNOWN = "unknown", "Unknown"
+
+        # core
+        DAILY = "daily", "Daily claim"
+        GIVE_SENT = "give_sent", "Gave berries away"
+        GIVE_RECEIVED = "give_received", "Received berries"
+        SPAWN_CATCH = "spawn_catch", "Caught a berry spawn"
+        ACHIEVEMENT = "achievement", "Achievement reward"
+        TRADE = "trade", "Trade"
+        ADMIN_ADJUST = "admin_adjust", "Admin adjustment"
+
+        # auction house — direct sales and Buggy's shop
+        AUCTION_SELL = "auction_sell", "Sold to Buggy"
+        AUCTION_SHOP_BUY = "auction_shop_buy", "Bought from Buggy's shop"
+
+        # auction house — player listings (bids are escrowed until settled)
+        AUCTION_BID_HOLD = "auction_bid_hold", "Bid placed (berries held)"
+        AUCTION_BID_REFUND = "auction_bid_refund", "Bid returned"
+        AUCTION_SALE_PAYOUT = "auction_sale_payout", "Listing sold (payout)"
+
+        # auction house — featured auctions
+        FEATURED_BID_HOLD = "featured_bid_hold", "Featured bid placed (berries held)"
+        FEATURED_BID_REFUND = "featured_bid_refund", "Featured bid returned"
+        FEATURED_PAYOUT = "featured_payout", "Featured auction sold (payout)"
+
+        # other packages
+        PACK_BUY = "pack_buy", "Bought a pack"
+        MERCHANT_BUY = "merchant_buy", "Bought from the merchant"
+        MERCHANT_TOKEN = "merchant_token", "Converted merchant tokens"
+        COLLECTIBLE_BUY = "collectible_buy", "Bought a collectible"
+        AUGMENT_BUY = "augment_buy", "Bought an augment"
+        BATTLE_ITEM_BUY = "battle_item_buy", "Bought a battle item"
+        BATTLE_WAGER_HOLD = "battle_wager_hold", "Battle wager (berries held)"
+        BATTLE_WAGER_REFUND = "battle_wager_refund", "Battle wager returned"
+        BATTLE_PAYOUT = "battle_payout", "Battle winnings"
+
+    player = models.ForeignKey(Player, on_delete=models.CASCADE, related_name="berry_transactions")
+    amount = models.BigIntegerField(help_text="Signed: positive credits the player, negative debits them.")
+    balance_after = models.PositiveBigIntegerField(help_text="The player's balance once this change was applied.")
+    reason = models.CharField(max_length=32, choices=Reason.choices, default=Reason.UNKNOWN)
+    description = models.CharField(
+        max_length=DESCRIPTION_MAX_LENGTH,
+        blank=True,
+        default="",
+        help_text="What this movement was for (item bought, listing ID, the other player, ...).",
+    )
+    server_id = models.BigIntegerField(
+        null=True, blank=True, help_text="Server the action happened in, when it came from a command."
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        managed = True
+        db_table = "berrytransaction"
+        indexes = (
+            models.Index(fields=("player", "-created_at")),
+            models.Index(fields=("reason",)),
+            models.Index(fields=("-created_at",)),
+        )
+
+    def __str__(self) -> str:
+        return f"{self.player} {self.amount:+} ({self.get_reason_display()})"
+
+
 class Item(models.Model):
     name = models.CharField(max_length=64)
     description = models.TextField(null=True, blank=True, help_text="An optional description for the item")

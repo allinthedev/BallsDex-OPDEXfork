@@ -2,6 +2,7 @@ import random
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
+from currency_app.models import BerryTransaction
 import discord
 from currency_app.models import Item
 from discord.ui import Button, button, select
@@ -101,7 +102,12 @@ class ShopPages(Pages):
                 )
                 return
             else:
-                await player.remove_money(pack.prize)
+                await player.remove_money(
+                    pack.prize,
+                    reason=BerryTransaction.Reason.PACK_BUY,
+                    description=f"Bought pack {pack.name}",
+                    server_id=interaction.guild_id,
+                )
 
         balls = [x.cached_ball async for x in pack.balls.all()]
         if balls:

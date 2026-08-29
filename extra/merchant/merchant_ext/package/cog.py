@@ -2,6 +2,7 @@ import logging
 import random
 from typing import TYPE_CHECKING
 
+from currency_app.models import BerryTransaction
 import discord
 from currency_app.models import CurrencySettings
 from discord import app_commands
@@ -179,7 +180,12 @@ class Merchant(commands.GroupCog):
             await interaction.followup.send("An error occurred while trying to buy the item.")
             return
         else:
-            await player.remove_money(item.prize)
+            await player.remove_money(
+                item.prize,
+                reason=BerryTransaction.Reason.MERCHANT_BUY,
+                description=f"Bought {item.name} from the merchant",
+                server_id=interaction.guild_id,
+            )
             await interaction.followup.send(
                 f"You've bought {item.name} for **{format_currency(item.prize, False, self.bot)}!**\n"
                 f"{instance.description(include_emoji=True, bot=self.bot)}"
@@ -279,7 +285,12 @@ class Merchant(commands.GroupCog):
             await interaction.followup.send("An error occurred while trying to convert tokens.")
             return
         else:
-            await player.add_money(merchant_settings.token_conversion_rate * amount)
+            await player.add_money(
+                merchant_settings.token_conversion_rate * amount,
+                reason=BerryTransaction.Reason.MERCHANT_TOKEN,
+                description=f"Converted {amount} merchant token(s)",
+                server_id=interaction.guild_id,
+            )
             await interaction.followup.send(
                 f"Converted! All tokens successfully converted into {settings.currency_plural}.\n"
                 f"Converted tokens: **{amount}**\n"
