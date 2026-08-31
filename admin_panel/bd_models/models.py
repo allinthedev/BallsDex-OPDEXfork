@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import datetime, timedelta
 from io import BytesIO
 from typing import TYPE_CHECKING, Any, Self, cast
 
@@ -575,6 +575,40 @@ class BallInstance(models.Model):
             await self.arefresh_from_db(fields=["locked"])
         self.locked
         return self.locked is not None and (self.locked + timedelta(minutes=30)) > timezone.now()
+
+
+class PlayerDataDeletion(models.Model):
+    """
+    Record that an account deleted its data, kept after the player row itself is gone.
+
+    Deleting a player wipes everything keyed to them, cooldowns included — the `/daily`
+    timer stored in `Player.extra_data` and the `/weekly` one on `PackResource`, which
+    cascades. That made deletion a way to reset cooldowns on demand: claim, give the
+    rewards to an alt, delete, repeat. Only the Discord ID and the time are kept, which is
+    the minimum needed to apply the restriction below and to spot repeat offenders.
+
+    Each deletion is its own row rather than one row per account, so the history stays
+    visible. Deleting a row from the admin lifts the restriction it caused.
+    """
+
+    RESTRICTION_DAYS = 7
+
+    discord_id = models.BigIntegerField(help_text="Discord user ID of the account that deleted its data")
+    deleted_at = models.DateTimeField(auto_now_add=True)
+
+    objects: Manager[Self] = Manager()
+
+    class Meta:
+        managed = True
+        db_table = "playerdatadeletion"
+        indexes = (models.Index(fields=("discord_id", "-deleted_at"), name="playerdatadel_discord_idx"),)
+
+    def __str__(self) -> str:
+        return f"{self.discord_id} deleted their data on {self.deleted_at}"
+
+    @property
+    def restricted_until(self) -> datetime:
+        return self.deleted_at + timedelta(days=self.RESTRICTION_DAYS)
 
 
 class BlacklistedID(models.Model):

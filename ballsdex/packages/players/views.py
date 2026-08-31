@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, NamedTuple, cast
 
 import discord
 from discord import ButtonStyle, SeparatorSpacing
+from discord.utils import format_dt
 from discord.ui import (
     ActionRow,
     Button,
@@ -22,7 +23,7 @@ from discord.ui import (
     button,
 )
 
-from ballsdex.core.discord import Modal
+from ballsdex.core.discord import Modal, View
 from ballsdex.core.utils.buttons import ConfirmChoiceView
 from bd_models.models import (
     Block,
@@ -31,6 +32,7 @@ from bd_models.models import (
     Friendship,
     MentionPolicy,
     Player,
+    PlayerDataDeletion,
     PrivacyPolicy,
     TradeCooldownPolicy,
 )
@@ -129,7 +131,7 @@ class DeleteDataModal(Modal, title="Confirm data deletion"):
         super().__init__()
         self.code = code
         self.confirmation.description = (
-            f"This will permanently delete all of your data and cannot be undone. Type {code} below to confirm."
+            f"This cannot be undone. Type {code} below to confirm."
         )
 
     async def on_submit(self, interaction: Interaction):
@@ -143,7 +145,31 @@ class DeleteDataModal(Modal, title="Confirm data deletion"):
         player = await Player.objects.aget_or_none(discord_id=interaction.user.id)
         if player:
             await player.adelete()
-        await interaction.followup.send("Your player data has been permanently deleted.", ephemeral=True)
+
+        # Recorded after the player row is gone, so it survives the deletion. Deleting a player
+        # also clears their reward cooldowns, which was being used to claim /daily and /weekly
+        # over and over; the restriction below makes that pointless.
+        deletion = await PlayerDataDeletion.objects.acreate(discord_id=interaction.user.id)
+        interaction.client.data_deletion_restrictions[interaction.user.id] = deletion.restricted_until
+
+        await interaction.followup.send(
+            "Your player data has been permanently deleted.\n\n"
+            f"Your account is now restricted until {format_dt(deletion.restricted_until, 'F')} "
+            f"({format_dt(deletion.restricted_until, 'R')}).",
+            ephemeral=True,
+        )
+
+
+class ConfirmDeleteDataView(View):
+    """Second step of the deletion flow, so the warning above is seen before the code prompt."""
+
+    def __init__(self):
+        super().__init__(timeout=120)
+
+    @button(label="I understand, delete my data", style=ButtonStyle.danger)
+    async def confirm(self, interaction: Interaction, button: Button):
+        code = "".join(random.choices(CONFIRMATION_CODE_CHARS, k=6))
+        await interaction.response.send_modal(DeleteDataModal(code))
 
 
 class DataActionRow(ActionRow):
@@ -156,8 +182,21 @@ class DataActionRow(ActionRow):
 
     @button(label="Delete all data")
     async def delete(self, interaction: Interaction, button: Button):
-        code = "".join(random.choices(CONFIRMATION_CODE_CHARS, k=6))
-        await interaction.response.send_modal(DeleteDataModal(code))
+        # The consequences are spelled out here rather than in the modal: a modal label only
+        # holds a short line, and this is irreversible enough to deserve being read first.
+        await interaction.response.send_message(
+            "## Delete all of your data\n"
+            "**This is irreversible.** Every "
+            f"{settings.plural_collectible_name} in your inventory and all of your data will be "
+            "permanently deleted. Nothing can be restored afterwards.\n\n"
+            f"Your account will then be **restricted for {PlayerDataDeletion.RESTRICTION_DAYS} days**, "
+            "during which you will not be able to use the bot.\n\n"
+            "We reserve the right to keep your user ID and the time of the deletion — and nothing "
+            "else — to enforce that restriction and prevent abuse.",
+            view=ConfirmDeleteDataView(),
+            ephemeral=True,
+        )
+
 
 
 class SettingsContainer(Container):

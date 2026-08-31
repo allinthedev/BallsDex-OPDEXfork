@@ -7,7 +7,7 @@ import math
 import time
 import types
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Self, Sequence
 
 import aiohttp
@@ -21,6 +21,7 @@ from discord.enums import Locale
 from discord.ext import commands
 from discord.utils import MISSING
 from django.apps import apps
+from django.utils import timezone
 from prometheus_client import Histogram
 from rich import box, print
 from rich.console import Console
@@ -38,6 +39,7 @@ from bd_models.models import (
     BlacklistedGuild,
     BlacklistedID,
     Economy,
+    PlayerDataDeletion,
     Regime,
     Special,
     balls,
@@ -253,6 +255,8 @@ class BallsDexBot(commands.AutoShardedBot):
         self.application_emojis: dict[int, discord.Emoji] = {}
         self.blacklist: set[int] = set()
         self.blacklist_guild: set[int] = set()
+        # discord_id -> when their most recent data deletion stops restricting them
+        self.data_deletion_restrictions: dict[int, datetime] = {}
         self.catch_log: set[int] = set()
         self.command_log: set[int] = set()
         self.locked_balls = TTLCache(maxsize=99999, ttl=60 * 30)
@@ -330,6 +334,14 @@ class BallsDexBot(commands.AutoShardedBot):
         async for blacklisted_id in BlacklistedID.objects.all().only("discord_id"):
             self.blacklist.add(blacklisted_id.discord_id)
         table.add_row("Blacklisted users", str(len(self.blacklist)))
+
+        self.data_deletion_restrictions = {}
+        cutoff = timezone.now() - timedelta(days=PlayerDataDeletion.RESTRICTION_DAYS)
+        async for deletion in PlayerDataDeletion.objects.filter(deleted_at__gte=cutoff).only(
+            "discord_id", "deleted_at"
+        ):
+            self.data_deletion_restrictions[deletion.discord_id] = deletion.restricted_until
+        table.add_row("Data deletion restrictions", str(len(self.data_deletion_restrictions)))
 
         self.blacklist_guild = set()
         async for blacklisted_id in BlacklistedGuild.objects.all().only("discord_id"):
@@ -475,6 +487,19 @@ class BallsDexBot(commands.AutoShardedBot):
                 ephemeral=True,
             )
             return False
+        if restricted_until := self.data_deletion_restrictions.get(user.id):
+            if restricted_until > timezone.now():
+                await send_func(
+                    "You deleted your data, so your account is restricted until "
+                    f"{discord.utils.format_dt(restricted_until, 'F')} "
+                    f"({discord.utils.format_dt(restricted_until, 'R')}).\n"
+                    "This restriction exists because deleting data also clears reward cooldowns, "
+                    "which was being used to claim them repeatedly.",
+                    ephemeral=True,
+                )
+                return False
+            # expired — drop it so the check stops running for this user
+            del self.data_deletion_restrictions[user.id]
         if guild_id and guild_id in self.blacklist_guild:
             await send_func(
                 "This server is blacklisted from the bot."
