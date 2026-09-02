@@ -1,7 +1,6 @@
 import logging
 import random
 from datetime import timedelta
-from io import BytesIO
 from typing import TYPE_CHECKING
 
 import discord
@@ -9,7 +8,6 @@ import topgg
 from django.db.models import Q
 from django.utils import timezone
 
-from ballsdex.core.image_generator.image_gen import draw_card
 from bd_models.models import Ball, BallInstance, Player, Special
 from preview.utils import refresh_cache
 from settings.models import settings as bot_settings
@@ -50,10 +48,7 @@ async def _send_dm(bot: "BallsDexBot", discord_id: int, instance: BallInstance) 
         reward_name = f"{special.name} {ball.country}" if special else ball.country
 
         await refresh_cache()
-        image, save_kwargs = draw_card(instance)
-        buffer = BytesIO()
-        image.save(buffer, **save_kwargs)
-        buffer.seek(0)
+        buffer = instance.draw_card()
 
         await user.send(
             content=f"🎉 Thanks for voting! Here's your reward: **{reward_name}**",
